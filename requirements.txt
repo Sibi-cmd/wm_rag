@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+boto3
+psycopg2-binary
+langchain
+langchain-community
+langchain-huggingface
+langchain-text-splitters
+sentence-transformers
+pypdf
+python-dotenv
+mistralai
+pinecone
+redis
+tiktoken
