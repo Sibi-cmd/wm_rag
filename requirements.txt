@@ -13,3 +13,7 @@ mistralai
 pinecone
 redis
 tiktoken
+qdrant-client
+pymongo
+google-generativeai
+
