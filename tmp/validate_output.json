@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "json": {
+    "suggestion": "INSUFFICIENT INFORMATION IN DOCUMENT CONTEXT",
+    "confidence": 0.0,
+    "predictedCategory": "General Logistics",
+    "status": "SUCCESS"
+  }
+}

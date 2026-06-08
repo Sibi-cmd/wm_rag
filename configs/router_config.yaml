@@ -1,0 +1,22 @@
+# =====================================================================
+# router_config.yaml
+# Configuration for the RAG Router & Middleman API Service.
+# =====================================================================
+
+# 1. Base RAG Configuration
+# Defines default settings for embedding and LLM generation across all dynamic pipelines.
+base_rag_config: "configs/rag_config.yaml"
+
+# 2. Router LRU Cache Settings
+# Controls memory management and connection lifespans.
+router:
+  max_cached_pipelines: 50     # Max number of active database pipelines kept in memory
+  ttl_seconds: 1800            # Unload pipeline from RAM after 30 minutes of inactivity
+  local_index_base_dir: "./vector_dbs" # Base directory for local FAISS/Vector caching
+
+# 3. Secure Connection Registry (Aliases)
+# Mask database connection strings behind safe keys.
+# Your service (FastAPI / Django) can pass these keys as "db_name" to avoid sending raw URLs.
+connections:
+  inspections_alias: "sqlite:///scratch/inspections_demo.sqlite"
+  fleet_alias: "sqlite:///scratch/fleet_demo.sqlite"

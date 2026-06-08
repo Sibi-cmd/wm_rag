@@ -1,0 +1,62 @@
+# =====================================================================
+# rag_config.yaml
+# Default configuration for the plug-and-play RAG pipeline.
+# =====================================================================
+
+# 1. Embedder Configuration
+# Converts text chunks and search queries into numerical vectors.
+embedder:
+  provider: "sentence-transformers"
+  model: "all-mpnet-base-v2"  # Produces 768-dimensional vectors
+
+# 2. Vector Store Configuration
+# Persists and performs similarity search on embeddings.
+# Choose "faiss" for quick local development, or "pinecone" for production cloud deployment.
+vector_store:
+  provider: "faiss"            # Set to "pinecone" or "faiss"
+  index_name: "field-inspections"
+  api_key_env: "PINECONE_API_KEY"
+  index_path: "./faiss_index"  # Local storage path (FAISS only)
+  dimensions: 768              # Must match your embedder's output dimensions
+
+# 3. Generator (LLM) Configuration
+# Synthesizes the final answer using retrieved context.
+# Works with OpenAI, local Ollama, DeepSeek, Groq, and other OpenAI-compatible APIs.
+generator:
+  provider: "openai"
+  model: "gpt-4o-mini"          # Use your desired model, e.g., "deepseek-chat", "llama3"
+  api_key_env: "OPENAI_API_KEY"
+  max_retries: 3
+  timeout: 30
+  # Custom Endpoint Support (Optional)
+  # Un-comment the following lines for local Ollama or custom providers:
+  # base_url: "http://localhost:11434/v1"   # For local Ollama
+  # base_url: "https://api.deepseek.com"     # For DeepSeek API
+
+
+# 4. Chunker Configuration
+# Controls how large documents are split into smaller segments.
+chunker:
+  chunk_size: 500              # Max tokens per chunk
+  chunk_overlap: 50            # Overlap between consecutive chunks
+
+# 5. Retrieval & Re-ranking Configuration
+# Controls similarity retrieval and result relevance ranking.
+retrieval:
+  top_k: 5                     # Chunks retrieved from vector store
+  rerank: true                 # Combine vector similarity and keyword overlap re-scoring
+  rerank_top_k: 3              # Keep the top N results after reranking
+
+# 6. Prompt Template
+# Formats context and question before sending to the LLM.
+# Must include "{context}" and "{question}" placeholders.
+prompt_template: |
+  Use the following context to answer the question.
+  If you cannot find the answer in the context, say "I don't have enough information."
+
+  Context:
+  {context}
+
+  Question: {question}
+
+  Answer:

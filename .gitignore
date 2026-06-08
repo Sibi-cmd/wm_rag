@@ -1,0 +1,75 @@
+__pycache__/
+.env
+.env.example
+venv/
+*.py[cod]
+*$py.class
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# OS specific
+Thumbs.db
+Desktop.ini
+
+# Python / Testing caches
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code
+.vscode/
+
+# Local data & temporary scripts
+scratch/
+data/
+downloads/
+
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+frontend/android/app/debug
+frontend/android/app/profile
+frontend/android/app/release
+
+# Additional Environment variants
+.env.*
+!.env.example
+
+# Python compiled modules
+*.pyd
+*.so
+
+# Dynamic tenant vector databases
+vector_dbs/
+faiss_index/
+
+
