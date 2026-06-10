@@ -28,7 +28,7 @@ _redis_client = None
 _qdrant_client = None
 _mongo_client = None
 
-def get_redis_client():
+def get_redis_client(ping=True):
     global _redis_client
     if _redis_client is None:
         _redis_client = redis.Redis(
@@ -36,13 +36,16 @@ def get_redis_client():
             port=REDIS_PORT,
             password=REDIS_PASSWORD,
             decode_responses=True,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
         )
-        try:
-            _redis_client.ping()
-            logger.info("[Redis] Connected to Redis successfully")
-        except Exception as e:
-            logger.error(f"[Redis] Connection error: {e}")
-            raise
+        if ping:
+            try:
+                _redis_client.ping()
+                logger.info("[Redis] Connected to Redis successfully")
+            except Exception as e:
+                logger.error(f"[Redis] Connection error: {e}")
+                raise
     return _redis_client
 
 def get_qdrant_client():
@@ -51,20 +54,22 @@ def get_qdrant_client():
         _qdrant_client = QdrantClient(
             url=QDRANT_URL,
             api_key=QDRANT_API_KEY,
+            timeout=2.0,
         )
     return _qdrant_client
 
-def get_mongodb_db():
+def get_mongodb_db(ping=True):
     global _mongo_client
     if _mongo_client is None:
         # serverSelectionTimeoutMS ensures we don't hang indefinitely on connection attempts
-        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        try:
-            _mongo_client.server_info()
-            logger.info("[MongoDB] Connected to MongoDB successfully")
-        except Exception as e:
-            logger.error(f"[MongoDB] Connection error: {e}")
-            raise
+        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
+        if ping:
+            try:
+                _mongo_client.server_info()
+                logger.info("[MongoDB] Connected to MongoDB successfully")
+            except Exception as e:
+                logger.error(f"[MongoDB] Connection error: {e}")
+                raise
     return _mongo_client[MONGODB_DB_NAME]
 
 # Backwards‑compatible global client (may be used elsewhere)
@@ -73,4 +78,6 @@ redis_client = redis.Redis(
     port=REDIS_PORT,
     password=REDIS_PASSWORD,
     decode_responses=True,
+    socket_timeout=2.0,
+    socket_connect_timeout=2.0,
 )

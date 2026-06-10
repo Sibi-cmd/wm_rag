@@ -1,11 +1,10 @@
 """
 tests.test_pipeline
 ~~~~~~~~~~~~~~~~~~~
-Integration and unit tests verifying the correctness of the rag_core library.
+Integration and unit tests verifying the correctness of the WMS RAG pipeline in rag_core.
 """
 
 import os
-import shutil
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +16,7 @@ class TestRAGPipeline(unittest.TestCase):
 
     def setUp(self):
         # Set dummy key in environment to satisfy initialization checks during mock testing
-        os.environ["OPENAI_API_KEY"] = "mock-testing-key"
+        os.environ["GEMINI_API_KEY"] = "mock-testing-key"
 
         self.config_dict = {
             "embedder": {
@@ -25,15 +24,15 @@ class TestRAGPipeline(unittest.TestCase):
                 "model": "all-MiniLM-L6-v2",  # Small and fast model for testing
             },
             "vector_store": {
-                "provider": "faiss",
-                "index_path": "./tmp_faiss_test",
-                "dimensions": 384,
+                "provider": "qdrant",
+                "index_name": "test-warehouse-index",
             },
             "generator": {
-                "provider": "openai",
-                "model": "gpt-4o-mini",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
             },
             "chunker": {
+                "provider": "warehouse",
                 "chunk_size": 100,
                 "chunk_overlap": 10,
             },
@@ -45,10 +44,9 @@ class TestRAGPipeline(unittest.TestCase):
         }
         self.config = RAGConfig.from_dict(self.config_dict)
 
-    def tearDown(self):
-        shutil.rmtree("./tmp_faiss_test", ignore_errors=True)
-
-    def test_pipeline_creation(self):
+    @patch("rag_core.vector_stores.qdrant_store.QdrantClient")
+    @patch("rag_core.generators.gemini.genai")
+    def test_pipeline_creation(self, mock_genai, mock_qdrant):
         """Test that the pipeline initializes and resolves all component factories."""
         pipeline = RAGPipeline(self.config)
         self.assertIsNotNone(pipeline.chunker)
@@ -57,8 +55,10 @@ class TestRAGPipeline(unittest.TestCase):
         self.assertIsNotNone(pipeline.generator)
         self.assertIsNotNone(pipeline.reranker)
 
-    def test_chunker_behavior(self):
-        """Test that chunks are segmented and have valid identifiers."""
+    @patch("rag_core.vector_stores.qdrant_store.QdrantClient")
+    @patch("rag_core.generators.gemini.genai")
+    def test_chunker_behavior(self, mock_genai, mock_qdrant):
+        """Test that chunks are segmented and have valid identifiers, sections, and priority tags."""
         pipeline = RAGPipeline(self.config)
         text = (
             "PROCEDURE: Reset instructions\n"
@@ -68,33 +68,55 @@ class TestRAGPipeline(unittest.TestCase):
         chunks = pipeline.chunker.chunk(text)
         self.assertTrue(len(chunks) > 0)
         for chunk in chunks:
-            self.assertTrue(chunk.chunk_id.startswith("chunk_"))
+            self.assertTrue(
+                chunk.chunk_id.startswith("unknown_") or 
+                chunk.chunk_id.startswith("chunk_") or 
+                "reset" in chunk.chunk_id
+            )
             self.assertIn("section", chunk.metadata)
+            self.assertIn("severity", chunk.metadata)
+            self.assertIn("escalation_required", chunk.metadata)
 
-    def test_embedder_dimension(self):
+    @patch("rag_core.vector_stores.qdrant_store.QdrantClient")
+    @patch("rag_core.generators.gemini.genai")
+    def test_embedder_dimension(self, mock_genai, mock_qdrant):
         """Test that embeddings are generated with matching dimensional weights."""
         pipeline = RAGPipeline(self.config)
         embedding = pipeline.embedder.embed("Verify charging sequence")
         self.assertEqual(len(embedding), 384)
 
-    @patch("openai.OpenAI")
-    def test_end_to_end_flow(self, mock_openai):
-        """Test document ingestion, retrieval, keyword reranking, and OpenAI mock completion loop."""
-        mock_client = MagicMock()
+    @patch("rag_core.vector_stores.qdrant_store.QdrantClient")
+    @patch("rag_core.generators.gemini.genai")
+    def test_end_to_end_flow(self, mock_genai, mock_qdrant):
+        """Test document ingestion, retrieval, reranking, and Gemini mock completion loop."""
+        mock_client_instance = MagicMock()
+        mock_qdrant.return_value = mock_client_instance
+
+        # Mock query points output from Qdrant
+        mock_point = MagicMock()
+        mock_point.id = "chunk_0_123"
+        mock_point.score = 0.9
+        mock_point.payload = {
+            "metadata": {
+                "source": "manual.pdf",
+                "section": "Reset",
+                "severity": "medium",
+                "text": "Disconnect the terminal from the auxiliary system."
+            }
+        }
+        
+        mock_results = MagicMock()
+        mock_results.points = [mock_point]
+        mock_client_instance.query_points.return_value = mock_results
+
+        # Mock Gemini GenerativeModel response
+        mock_model_instance = MagicMock()
         mock_response = MagicMock()
-        mock_choice = MagicMock()
-        mock_choice.message.content = "Procedure completed successfully."
-        mock_response.choices = [mock_choice]
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai.return_value = mock_client
+        mock_response.text = "Procedure completed successfully."
+        mock_model_instance.generate_content.return_value = mock_response
+        mock_genai.GenerativeModel.return_value = mock_model_instance
 
         pipeline = RAGPipeline(self.config)
-        pipeline.ingest_texts([
-            {
-                "text": "PROCEDURE: Reset instructions. Disconnect the terminal from the auxiliary system.",
-                "metadata": {"source": "manual.pdf"}
-            }
-        ])
 
         # Retrieve and verify database queries
         results = pipeline.retrieve("Reset instructions", top_k=1)

@@ -11,13 +11,9 @@ from .base import BaseVectorStore
 
 # Registry: provider name → (module path, class name)
 _VECTOR_STORE_REGISTRY = {
-    "pinecone": (
-        "rag_core.vector_stores.pinecone_store",
-        "PineconeStore",
-    ),
-    "faiss": (
-        "rag_core.vector_stores.faiss_store",
-        "FAISSStore",
+    "qdrant": (
+        "rag_core.vector_stores.qdrant_store",
+        "QdrantStore",
     ),
 }
 

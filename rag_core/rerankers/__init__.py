@@ -9,13 +9,13 @@ from __future__ import annotations
 from .base import BaseReranker
 
 _RERANKER_REGISTRY = {
-    "keyword": (
-        "rag_core.rerankers.keyword",
-        "KeywordReranker",
+    "warehouse": (
+        "rag_core.rerankers.warehouse",
+        "WarehouseReranker",
     ),
 }
 
-_DEFAULT_RERANKER = "keyword"
+_DEFAULT_RERANKER = "warehouse"
 
 
 def create_reranker(provider: str | None = None) -> BaseReranker:

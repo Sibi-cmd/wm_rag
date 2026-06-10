@@ -2,15 +2,41 @@ import json
 import re
 import tiktoken
 from typing import Optional, Tuple
-from .retriever import QdrantRetriever
-from .reranker import Reranker
-from .llm_client import GeminiClient
+from rag_core import RAGConfig, RAGPipeline as CoreRAGPipeline
+
 
 class RAGPipeline:
     def __init__(self, collection_name: str = "warehouse-index"):
-        self.retriever = QdrantRetriever(collection_name)
-        self.reranker = Reranker()
-        self.llm = GeminiClient()
+        config_dict = {
+            "embedder": {
+                "provider": "sentence-transformers",
+                "model": "sentence-transformers/all-mpnet-base-v2"
+            },
+            "vector_store": {
+                "provider": "qdrant",
+                "index_name": collection_name,
+            },
+            "generator": {
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "max_retries": 3,
+            },
+            "chunker": {
+                "provider": "warehouse",
+                "chunk_size": 500,
+                "chunk_overlap": 50,
+            },
+            "retrieval": {
+                "top_k": 8,
+                "rerank": True,
+                "rerank_top_k": 4,
+                "extra": {
+                    "reranker_provider": "warehouse"
+                }
+            }
+        }
+        config = RAGConfig.from_dict(config_dict)
+        self.core_pipeline = CoreRAGPipeline(config)
 
     def get_token_count(self, text: str, model: str = "gpt-3.5-turbo") -> int:
         try:
@@ -54,11 +80,40 @@ class RAGPipeline:
         Coordinates full RAG flow: Retrieval -> Reranking -> LLM Query Generation
         Returns a tuple: (suggestion, confidence, predicted_category, ocr_document_id)
         """
-        # 1. Retrieve
-        raw_matches = self.retriever.retrieve(query, top_k=8, document_type=document_type)
+        # Convert document_type filter for Qdrant
+        filters = {}
+        if document_type:
+            filters["metadata.document_type"] = document_type
 
-        # 2. Rerank
-        top_matches = self.reranker.rerank(query, raw_matches, top_n=4)
+        # 1. Retrieve initial candidates using embedder + vector store components
+        query_vector = self.core_pipeline.embedder.embed(query)
+        raw_results = self.core_pipeline.vector_store.search(
+            vector=query_vector,
+            top_k=8,
+            filters=filters
+        )
+
+        # 2. Rerank using the core pipeline's custom warehouse reranker
+        top_results = self.core_pipeline.reranker.rerank(query, raw_results, top_k=4)
+
+        # Convert back to dicts to maintain exact output structure for debugging/compatibility
+        raw_matches = [
+            {
+                "id": r.chunk_id,
+                "score": r.score,
+                "metadata": r.metadata
+            }
+            for r in raw_results
+        ]
+        top_matches = [
+            {
+                "id": r.chunk_id,
+                "score": r.score,
+                "metadata": r.metadata
+            }
+            for r in top_results
+        ]
+
         print('DEBUG: raw_matches count', len(raw_matches))
         print('DEBUG: raw_matches content', raw_matches)
         print('DEBUG: top_matches count', len(top_matches))
@@ -149,16 +204,29 @@ OUTPUT FORMAT: STRICT JSON — keep all values CLEAR and ACTIONABLE.
 }}
 """
 
-        # 4. Generate LLM response using Gemini client
+        # 4. Generate LLM response using core pipeline's Gemini generator
         try:
-            suggestion = await self.llm.generate_response(prompt)
+            suggestion = await self.core_pipeline.agenerate(prompt)
         except Exception as e:
             print(f"RAG LLM Error: {e}", flush=True)
-            suggestion = json.dumps({
-                "analysis_summary": "AI service unavailable",
-                "possible_issues": [],
-                "recommended_actions": ["Retry later"]
-            })
+            if "API key not found" in str(e) or "not set" in str(e):
+                print("Running in MOCK LOCAL MODE (no GEMINI_API_KEY). Returning retrieved context mock JSON.", flush=True)
+                suggestion = json.dumps({
+                    "analysis_summary": f"[MOCK LOCAL MODE] Found matching document {top_ocr_doc_id} under section '{top_section}'. Set GEMINI_API_KEY in .env to get a real LLM synthesized answer.",
+                    "possible_issues": [f"Issues related to: {top_section}"],
+                    "recommended_actions": [
+                        "Verify terminal connection.",
+                        "Add GEMINI_API_KEY to your .env file to enable live Gemini synthesis."
+                    ],
+                    "document_reference": [f"Section: {top_section}"],
+                    "confidence": final_confidence
+                })
+            else:
+                suggestion = json.dumps({
+                    "analysis_summary": "AI service unavailable",
+                    "possible_issues": [],
+                    "recommended_actions": ["Retry later"]
+                })
 
         # Strip markdown code blocks if the LLM output wrapped the JSON
         if "```" in suggestion:

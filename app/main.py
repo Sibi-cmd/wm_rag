@@ -14,8 +14,7 @@ from .models import (
 )
 from .database import get_redis_client, get_mongodb_db, get_qdrant_client
 from .rag_pipeline import RAGPipeline
-from .processor import DocumentProcessor
-from .embeddings import get_embedding
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client.models import PointStruct
 import uuid
 
@@ -32,9 +31,21 @@ mongo_db = None
 async def lifespan(app: FastAPI):
     global rag_pipeline, redis_client, mongo_db
     print("Starting Warehouse AI service with Qdrant, MongoDB, Redis, and Gemini...", flush=True)
-    redis_client = get_redis_client()
-    mongo_db = get_mongodb_db()
-    rag_pipeline = RAGPipeline()
+    try:
+        redis_client = get_redis_client(ping=False)
+    except Exception as e:
+        print(f"Warning: Failed to connect to Redis during startup: {e}. Will attempt lazy reconnection.", flush=True)
+    
+    try:
+        mongo_db = get_mongodb_db(ping=False)
+    except Exception as e:
+        print(f"Warning: Failed to connect to MongoDB during startup: {e}. Will attempt lazy reconnection.", flush=True)
+
+    try:
+        rag_pipeline = RAGPipeline()
+    except Exception as e:
+        print(f"Warning: Failed to initialize RAGPipeline during startup: {e}. Will attempt lazy initialization.", flush=True)
+        
     print("AI Service is ready.", flush=True)
     yield
     print("Shutting down...", flush=True)
@@ -246,13 +257,20 @@ async def analyze_query(request: WarehouseRequest):
 @app.post("/api/rag/ingest", response_model=dict, summary="Ingest OCR document text", description="Chunk OCR text, embed, and store in Qdrant warehouse-index.")
 async def rag_ingest(request: IngestRequest):
     # Initialize components
-    processor = DocumentProcessor()
+    global rag_pipeline
+    if rag_pipeline is None:
+        rag_pipeline = RAGPipeline()
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        model_name="gpt-3.5-turbo",
+        chunk_size=500,
+        chunk_overlap=50,
+    )
     qdrant_client = get_qdrant_client()
-    # Split raw text into chunks using the same splitter as the processor
-    chunk_texts = processor.text_splitter.split_text(request.text)
+    # Split raw text into chunks
+    chunk_texts = splitter.split_text(request.text)
     points = []
     for idx, chunk_text in enumerate(chunk_texts):
-        embedding = get_embedding(chunk_text)
+        embedding = rag_pipeline.core_pipeline.embedder.embed(chunk_text)
         # deterministic UUID per chunk
         point_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{request.ocr_document_id}_{idx}"))
         metadata = {

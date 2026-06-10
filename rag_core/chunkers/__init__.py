@@ -10,14 +10,14 @@ from ..config import ChunkerConfig
 from .base import BaseChunker
 
 _CHUNKER_REGISTRY = {
-    "recursive": (
-        "rag_core.chunkers.recursive",
-        "RecursiveChunker",
+    "warehouse": (
+        "rag_core.chunkers.warehouse",
+        "WarehouseChunker",
     ),
 }
 
 # Default chunker when no explicit provider is set in config
-_DEFAULT_CHUNKER = "recursive"
+_DEFAULT_CHUNKER = "warehouse"
 
 
 def create_chunker(config: ChunkerConfig) -> BaseChunker:

@@ -45,7 +45,7 @@ class RAGPipeline:
         # Reranker is optional but default is enabled
         self.reranker = None
         if config.retrieval.rerank:
-            reranker_provider = config.retrieval.extra.get("reranker_provider", "keyword")
+            reranker_provider = config.retrieval.extra.get("reranker_provider", "warehouse")
             self.reranker = create_reranker(reranker_provider)
 
     @classmethod

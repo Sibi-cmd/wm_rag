@@ -14,8 +14,7 @@ try:
     from app.s3_handler import S3Handler
 except ModuleNotFoundError:
     S3Handler = None  # type: ignore
-from app.processor import DocumentProcessor
-from app.embeddings import get_embedding
+from rag_core import RAGConfig, RAGPipeline
 from qdrant_client.models import PointStruct
 
 load_dotenv()
@@ -42,7 +41,35 @@ def ingest_documents(
     clear_existing: bool = False,
     collection_name: str = "warehouse-index"
 ):
-    processor = DocumentProcessor()
+    config_dict = {
+        "embedder": {
+            "provider": "sentence-transformers",
+            "model": "sentence-transformers/all-mpnet-base-v2"
+        },
+        "vector_store": {
+            "provider": "qdrant",
+            "index_name": collection_name,
+        },
+        "generator": {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+        },
+        "chunker": {
+            "provider": "warehouse",
+            "chunk_size": 500,
+            "chunk_overlap": 50,
+        },
+        "retrieval": {
+            "top_k": 8,
+            "rerank": True,
+            "rerank_top_k": 4,
+            "extra": {
+                "reranker_provider": "warehouse"
+            }
+        }
+    }
+    config = RAGConfig.from_dict(config_dict)
+    pipeline = RAGPipeline(config)
     qdrant_client = get_qdrant_client()
     mongo_db = get_mongodb_db()
 
@@ -83,7 +110,18 @@ def ingest_documents(
 
         # Extract & Chunk
         print("Extracting and semantic chunking document...")
-        chunks = processor.extract_and_chunk(target_path)
+        raw_chunks = pipeline.chunker.chunk_file(target_path)
+        chunks = []
+        for idx, c in enumerate(raw_chunks):
+            chunks.append({
+                "chunk_id": c.chunk_id,
+                "text": c.text,
+                "section": c.metadata.get("section", "General"),
+                "severity": c.metadata.get("severity", "low"),
+                "escalation_required": c.metadata.get("escalation_required", False),
+                "issue_id": c.metadata.get("issue_id", "UNKNOWN"),
+                "chunk_index": c.metadata.get("chunk_index", idx)
+            })
         print(f"Total chunks extracted: {len(chunks)}")
 
         if not chunks:
@@ -96,7 +134,7 @@ def ingest_documents(
         
         for i, chunk in enumerate(chunks):
             text = chunk['text']
-            embedding = get_embedding(text)
+            embedding = pipeline.embedder.embed(text)
             
             # Create a deterministic UUID from chunk_id
             point_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk['chunk_id']))

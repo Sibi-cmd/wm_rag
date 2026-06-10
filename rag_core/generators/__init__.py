@@ -10,13 +10,13 @@ from ..config import GeneratorConfig
 from .base import BaseGenerator
 
 _GENERATOR_REGISTRY = {
-    "openai": (
-        "rag_core.generators.openai",
-        "OpenAIGenerator",
+    "gemini": (
+        "rag_core.generators.gemini",
+        "GeminiGenerator",
     ),
 }
 
-_DEFAULT_GENERATOR = "openai"
+_DEFAULT_GENERATOR = "gemini"
 
 
 def create_generator(config: GeneratorConfig) -> BaseGenerator:
