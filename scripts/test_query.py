@@ -1,3 +1,7 @@
+"""
+Test query script — standalone testing of the RAG pipeline.
+Usage: python scripts/test_query.py "your question here" [document_type]
+"""
 import os
 import sys
 import asyncio
@@ -13,7 +17,7 @@ load_dotenv()
 
 async def main():
     if len(sys.argv) < 2:
-        print("Usage: python scripts/test_query.py \"<your question here>\" [document_type]")
+        print('Usage: python scripts/test_query.py "your question here" [document_type]')
         sys.exit(1)
         
     query = sys.argv[1]
@@ -26,15 +30,26 @@ async def main():
     pipeline = RAGPipeline()
     
     print("\n--- Phase 1: Retrieve & Rerank ---")
-    raw_matches = pipeline.retriever.retrieve(query, top_k=8, document_type=document_type)
-    print(f"Retrieved {len(raw_matches)} raw chunks from Qdrant.")
+    # Use the core pipeline components directly
+    query_vector = pipeline.core_pipeline.embedder.embed(query)
     
-    reranked_matches = pipeline.reranker.rerank(query, raw_matches, top_n=4)
-    print(f"Reranked and kept top {len(reranked_matches)} chunks:")
-    for idx, match in enumerate(reranked_matches):
-        meta = match.get("metadata", {})
-        print(f"  [{idx+1}] Score: {match['score']:.4f} | Section: {meta.get('section')} | Document ID: {meta.get('ocr_document_id')}")
-        text_snippet = meta.get('text', '')[:120].replace('\n', ' ')
+    filters = {}
+    if document_type:
+        filters["metadata.document_type"] = document_type
+    
+    raw_results = pipeline.core_pipeline.vector_store.search(
+        vector=query_vector,
+        top_k=8,
+        filters=filters
+    )
+    print(f"Retrieved {len(raw_results)} raw chunks from Qdrant.")
+    
+    reranked_results = pipeline.core_pipeline.reranker.rerank(query, raw_results, top_k=4)
+    print(f"Reranked and kept top {len(reranked_results)} chunks:")
+    for idx, result in enumerate(reranked_results):
+        meta = result.metadata or {}
+        print(f"  [{idx+1}] Score: {result.score:.4f} | Section: {meta.get('section')} | Document ID: {meta.get('ocr_document_id')}")
+        text_snippet = result.text[:120].replace('\n', ' ')
         print(f"      Text: {text_snippet}...")
         
     print("\n--- Phase 2: Generating Response using Gemini ---")
@@ -52,7 +67,7 @@ async def main():
         try:
             parsed = json.loads(suggestion)
             print(json.dumps(parsed, indent=2))
-        except:
+        except json.JSONDecodeError:
             print(suggestion)
             
     except Exception as e:

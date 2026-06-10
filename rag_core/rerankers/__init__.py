@@ -22,7 +22,7 @@ def create_reranker(provider: str | None = None) -> BaseReranker:
     """Factory that instantiates a reranker.
 
     Args:
-        provider: Provider name.  Defaults to ``"keyword"``.
+        provider: Provider name.  Defaults to ``"warehouse"``.
 
     Returns:
         A concrete BaseReranker instance.

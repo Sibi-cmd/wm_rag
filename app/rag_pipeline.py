@@ -1,8 +1,11 @@
 import json
+import logging
 import re
 import tiktoken
 from typing import Optional, Tuple
 from rag_core import RAGConfig, RAGPipeline as CoreRAGPipeline
+
+logger = logging.getLogger(__name__)
 
 
 class RAGPipeline:
@@ -42,7 +45,7 @@ class RAGPipeline:
         try:
             enc = tiktoken.encoding_for_model(model)
             return len(enc.encode(text))
-        except:
+        except Exception:
             return len(text) // 4
 
     def truncate_by_tokens(self, text: str, max_tokens: int = 1500, model: str = "gpt-3.5-turbo") -> str:
@@ -52,7 +55,7 @@ class RAGPipeline:
             if len(tokens) <= max_tokens:
                 return text
             return enc.decode(tokens[:max_tokens]) + "...[truncated]"
-        except:
+        except Exception:
             return text[:max_tokens * 4]
 
     def clean_category_name(self, category: str) -> str:
@@ -114,10 +117,8 @@ class RAGPipeline:
             for r in top_results
         ]
 
-        print('DEBUG: raw_matches count', len(raw_matches))
-        print('DEBUG: raw_matches content', raw_matches)
-        print('DEBUG: top_matches count', len(top_matches))
-        print('DEBUG: top_matches content', top_matches)
+        logger.debug(f"raw_matches count: {len(raw_matches)}")
+        logger.debug(f"top_matches count: {len(top_matches)}")
 
         # Prepare context and identify top attributes
         manual_context = ""
@@ -208,9 +209,9 @@ OUTPUT FORMAT: STRICT JSON — keep all values CLEAR and ACTIONABLE.
         try:
             suggestion = await self.core_pipeline.agenerate(prompt)
         except Exception as e:
-            print(f"RAG LLM Error: {e}", flush=True)
+            logger.error(f"RAG LLM Error: {e}", exc_info=True)
             if "API key not found" in str(e) or "not set" in str(e):
-                print("Running in MOCK LOCAL MODE (no GEMINI_API_KEY). Returning retrieved context mock JSON.", flush=True)
+                logger.warning("Running in MOCK LOCAL MODE (no GEMINI_API_KEY). Returning retrieved context mock JSON.")
                 suggestion = json.dumps({
                     "analysis_summary": f"[MOCK LOCAL MODE] Found matching document {top_ocr_doc_id} under section '{top_section}'. Set GEMINI_API_KEY in .env to get a real LLM synthesized answer.",
                     "possible_issues": [f"Issues related to: {top_section}"],
@@ -219,13 +220,13 @@ OUTPUT FORMAT: STRICT JSON — keep all values CLEAR and ACTIONABLE.
                         "Add GEMINI_API_KEY to your .env file to enable live Gemini synthesis."
                     ],
                     "document_reference": [f"Section: {top_section}"],
-                    "confidence": final_confidence
+                    "confidence": top_confidence
                 })
             else:
                 suggestion = json.dumps({
-                    "analysis_summary": "AI service unavailable",
-                    "possible_issues": [],
-                    "recommended_actions": ["Retry later"]
+                    "analysis_summary": "AI service temporarily unavailable. Please retry shortly.",
+                    "possible_issues": [str(e)],
+                    "recommended_actions": ["Retry the request after a short wait."]
                 })
 
         # Strip markdown code blocks if the LLM output wrapped the JSON
@@ -238,8 +239,8 @@ OUTPUT FORMAT: STRICT JSON — keep all values CLEAR and ACTIONABLE.
         try:
             ai_json = json.loads(suggestion)
             ai_confidence = float(ai_json.get("confidence", 0.0))
-        except:
-            pass
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.debug(f"Could not parse AI confidence from response: {e}")
 
         final_confidence = max(top_confidence, ai_confidence)
         

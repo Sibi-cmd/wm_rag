@@ -24,7 +24,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
 
         self.model_name = config.model
         self._model = SentenceTransformer(self.model_name)
-        self._dimensions = self._model.get_sentence_embedding_dimension()
+        self._dimensions = self._model.get_embedding_dimension()
 
     # ---- BaseEmbedder interface ----
 

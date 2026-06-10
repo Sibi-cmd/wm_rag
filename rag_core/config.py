@@ -26,9 +26,9 @@ class EmbedderConfig:
 
 @dataclass
 class VectorStoreConfig:
-    provider: str = "pinecone"
+    provider: str = "qdrant"
     index_name: str = "default-index"
-    api_key_env: str = "PINECONE_API_KEY"
+    api_key_env: str = "QDRANT_API_KEY"
     # FAISS-specific
     index_path: str = "./faiss_index"
     dimensions: int = 768
@@ -41,9 +41,9 @@ class VectorStoreConfig:
 
 @dataclass
 class GeneratorConfig:
-    provider: str = "openai"
-    model: str = "gpt-4o-mini"
-    api_key_env: str = "OPENAI_API_KEY"
+    provider: str = "gemini"
+    model: str = "gemini-2.5-flash"
+    api_key_env: str = "GEMINI_API_KEY"
     max_retries: int = 3
     timeout: int = 30
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -55,6 +55,7 @@ class GeneratorConfig:
 
 @dataclass
 class ChunkerConfig:
+    provider: str = "warehouse"
     chunk_size: int = 500
     chunk_overlap: int = 50
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -173,8 +174,9 @@ class RAGConfig:
         # Chunker
         if "chunker" in raw:
             c = raw["chunker"]
-            known = {"chunk_size", "chunk_overlap"}
+            known = {"provider", "chunk_size", "chunk_overlap"}
             cfg.chunker = ChunkerConfig(
+                provider=c.get("provider", cfg.chunker.provider),
                 chunk_size=c.get("chunk_size", cfg.chunker.chunk_size),
                 chunk_overlap=c.get("chunk_overlap", cfg.chunker.chunk_overlap),
                 extra=_pop_known(c, known),

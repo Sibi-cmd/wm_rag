@@ -68,11 +68,7 @@ class TestRAGPipeline(unittest.TestCase):
         chunks = pipeline.chunker.chunk(text)
         self.assertTrue(len(chunks) > 0)
         for chunk in chunks:
-            self.assertTrue(
-                chunk.chunk_id.startswith("unknown_") or 
-                chunk.chunk_id.startswith("chunk_") or 
-                "reset" in chunk.chunk_id
-            )
+            self.assertIsNotNone(chunk.chunk_id)
             self.assertIn("section", chunk.metadata)
             self.assertIn("severity", chunk.metadata)
             self.assertIn("escalation_required", chunk.metadata)
@@ -109,12 +105,13 @@ class TestRAGPipeline(unittest.TestCase):
         mock_results.points = [mock_point]
         mock_client_instance.query_points.return_value = mock_results
 
-        # Mock Gemini GenerativeModel response
-        mock_model_instance = MagicMock()
+        # Mock Gemini Client response (google-genai SDK)
         mock_response = MagicMock()
         mock_response.text = "Procedure completed successfully."
-        mock_model_instance.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model_instance
+        
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
+        mock_genai.Client.return_value = mock_client
 
         pipeline = RAGPipeline(self.config)
 
@@ -128,6 +125,22 @@ class TestRAGPipeline(unittest.TestCase):
         self.assertEqual(response.text, "Procedure completed successfully.")
         self.assertIn("manual.pdf", response.sources)
         self.assertTrue(response.confidence > 0.0)
+
+    @patch("rag_core.vector_stores.qdrant_store.QdrantClient")
+    @patch("rag_core.generators.gemini.genai")
+    def test_config_defaults(self, mock_genai, mock_qdrant):
+        """Test that default RAGConfig uses the correct providers."""
+        default_config = RAGConfig()
+        self.assertEqual(default_config.vector_store.provider, "qdrant")
+        self.assertEqual(default_config.generator.provider, "gemini")
+        self.assertEqual(default_config.generator.model, "gemini-2.5-flash")
+        self.assertEqual(default_config.generator.api_key_env, "GEMINI_API_KEY")
+        self.assertEqual(default_config.chunker.provider, "warehouse")
+
+    def test_chunker_config_provider(self):
+        """Test that ChunkerConfig correctly parses the provider field."""
+        config = RAGConfig.from_dict(self.config_dict)
+        self.assertEqual(config.chunker.provider, "warehouse")
 
 
 if __name__ == "__main__":

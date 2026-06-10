@@ -1,20 +1,23 @@
 """
 rag_core.generators.gemini
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
-Generator backed by Google Gemini API.
+Generator backed by Google Gemini API (using the google-genai SDK).
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
 
 from ..config import GeneratorConfig
 from .base import BaseGenerator
+
+logger = logging.getLogger("rag_core.generators.gemini")
 
 
 class GeminiGenerator(BaseGenerator):
@@ -30,13 +33,12 @@ class GeminiGenerator(BaseGenerator):
         self._api_key_env = config.api_key_env
         self._max_retries = config.max_retries or 3
         
-        self._model = None
+        self._client = None
         if self._api_key:
-            genai.configure(api_key=self._api_key)
-            self._model = genai.GenerativeModel(self._model_name)
+            self._client = genai.Client(api_key=self._api_key)
 
-    def _ensure_model(self) -> None:
-        if self._model is None:
+    def _ensure_client(self) -> None:
+        if self._client is None:
             # Recheck environment variables in case they were set dynamically
             self._api_key = self._api_key or os.getenv("GEMINI_API_KEY")
             if not self._api_key:
@@ -44,27 +46,31 @@ class GeminiGenerator(BaseGenerator):
                     f"Gemini API key not found. "
                     f"Please set the environment variable '{self._api_key_env}' or 'GEMINI_API_KEY'."
                 )
-            genai.configure(api_key=self._api_key)
-            self._model = genai.GenerativeModel(self._model_name)
+            self._client = genai.Client(api_key=self._api_key)
 
     # ---- BaseGenerator interface ----
 
     def generate(self, prompt: str, **kwargs) -> str:
-        self._ensure_model()
+        self._ensure_client()
         last_error = None
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = self._model.generate_content(prompt, **kwargs)
+                response = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt,
+                    **kwargs
+                )
                 return response.text
             except Exception as exc:
                 last_error = exc
                 if ("429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)) and attempt < self._max_retries:
-                    wait = [2, 4][attempt - 1] if attempt - 1 < 2 else 5
-                    print(f"[GeminiGenerator] Rate limited (attempt {attempt}), retrying in {wait}s...")
+                    wait = min(2 ** attempt, 30)
+                    logger.warning(f"Rate limited (attempt {attempt}/{self._max_retries}), retrying in {wait}s...")
                     time.sleep(wait)
                 elif attempt < self._max_retries:
-                    print(f"[GeminiGenerator] Error (attempt {attempt}): {exc}")
-                    time.sleep(1)
+                    wait = min(2 ** (attempt - 1), 10)
+                    logger.warning(f"Error (attempt {attempt}/{self._max_retries}): {exc}. Retrying in {wait}s...")
+                    time.sleep(wait)
                 else:
                     break
 
@@ -73,21 +79,26 @@ class GeminiGenerator(BaseGenerator):
         )
 
     async def agenerate(self, prompt: str, **kwargs) -> str:
-        self._ensure_model()
+        self._ensure_client()
         last_error = None
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = await self._model.generate_content_async(prompt, **kwargs)
+                response = await self._client.aio.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt,
+                    **kwargs
+                )
                 return response.text
             except Exception as exc:
                 last_error = exc
                 if ("429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)) and attempt < self._max_retries:
-                    wait = [2, 4][attempt - 1] if attempt - 1 < 2 else 5
-                    print(f"[GeminiGenerator] Rate limited (attempt {attempt}), retrying in {wait}s...")
+                    wait = min(2 ** attempt, 30)
+                    logger.warning(f"Rate limited (attempt {attempt}/{self._max_retries}), retrying in {wait}s...")
                     await asyncio.sleep(wait)
                 elif attempt < self._max_retries:
-                    print(f"[GeminiGenerator] Error (attempt {attempt}): {exc}")
-                    await asyncio.sleep(1)
+                    wait = min(2 ** (attempt - 1), 10)
+                    logger.warning(f"Error (attempt {attempt}/{self._max_retries}): {exc}. Retrying in {wait}s...")
+                    await asyncio.sleep(wait)
                 else:
                     break
 

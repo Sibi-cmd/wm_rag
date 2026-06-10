@@ -11,41 +11,34 @@ embedder:
 
 # 2. Vector Store Configuration
 # Persists and performs similarity search on embeddings.
-# Choose "faiss" for quick local development, or "pinecone" for production cloud deployment.
 vector_store:
-  provider: "faiss"            # Set to "pinecone" or "faiss"
-  index_name: "field-inspections"
-  api_key_env: "PINECONE_API_KEY"
-  index_path: "./faiss_index"  # Local storage path (FAISS only)
-  dimensions: 768              # Must match your embedder's output dimensions
+  provider: "qdrant"
+  index_name: "warehouse-index"
 
 # 3. Generator (LLM) Configuration
 # Synthesizes the final answer using retrieved context.
-# Works with OpenAI, local Ollama, DeepSeek, Groq, and other OpenAI-compatible APIs.
 generator:
-  provider: "openai"
-  model: "gpt-4o-mini"          # Use your desired model, e.g., "deepseek-chat", "llama3"
-  api_key_env: "OPENAI_API_KEY"
+  provider: "gemini"
+  model: "gemini-2.5-flash"
+  api_key_env: "GEMINI_API_KEY"
   max_retries: 3
   timeout: 30
-  # Custom Endpoint Support (Optional)
-  # Un-comment the following lines for local Ollama or custom providers:
-  # base_url: "http://localhost:11434/v1"   # For local Ollama
-  # base_url: "https://api.deepseek.com"     # For DeepSeek API
-
 
 # 4. Chunker Configuration
 # Controls how large documents are split into smaller segments.
 chunker:
+  provider: "warehouse"
   chunk_size: 500              # Max tokens per chunk
   chunk_overlap: 50            # Overlap between consecutive chunks
 
 # 5. Retrieval & Re-ranking Configuration
 # Controls similarity retrieval and result relevance ranking.
 retrieval:
-  top_k: 5                     # Chunks retrieved from vector store
-  rerank: true                 # Combine vector similarity and keyword overlap re-scoring
-  rerank_top_k: 3              # Keep the top N results after reranking
+  top_k: 8                    # Chunks retrieved from vector store
+  rerank: true                # Combine vector similarity and keyword overlap re-scoring
+  rerank_top_k: 4             # Keep the top N results after reranking
+  extra:
+    reranker_provider: "warehouse"
 
 # 6. Prompt Template
 # Formats context and question before sending to the LLM.

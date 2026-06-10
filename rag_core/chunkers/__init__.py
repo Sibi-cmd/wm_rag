@@ -22,7 +22,7 @@ _DEFAULT_CHUNKER = "warehouse"
 
 def create_chunker(config: ChunkerConfig) -> BaseChunker:
     """Factory that instantiates a chunker from config."""
-    provider = config.extra.get("provider", _DEFAULT_CHUNKER)
+    provider = config.provider or _DEFAULT_CHUNKER
 
     if provider not in _CHUNKER_REGISTRY:
         registered = ", ".join(sorted(_CHUNKER_REGISTRY))

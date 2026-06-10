@@ -6,16 +6,26 @@ Vector store backed by Qdrant.
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from typing import Any, Dict, List, Optional
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchValue,
+    PointIdsList,
+    PointStruct,
+)
 
 from ..config import VectorStoreConfig
 from ..types import SearchResult
 from .base import BaseVectorStore
+
+logger = logging.getLogger("rag_core.vector_stores.qdrant")
 
 
 class QdrantStore(BaseVectorStore):
@@ -87,7 +97,8 @@ class QdrantStore(BaseVectorStore):
                 limit=top_k,
                 with_payload=True
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Filtered search failed, retrying without filters: {exc}")
             # Fallback if filters fail (e.g. index fields not mapped yet)
             results = self._client.query_points(
                 collection_name=self._collection_name,
@@ -131,10 +142,12 @@ class QdrantStore(BaseVectorStore):
         delete_all: bool = False,
     ) -> None:
         if delete_all:
+            # Use FilterSelector with an empty filter to match all points
             self._client.delete(
                 collection_name=self._collection_name,
-                points_selector=Filter(must=[])
+                points_selector=FilterSelector(filter=Filter()),
             )
+            logger.info(f"Deleted all points from collection '{self._collection_name}'")
         elif ids:
             point_ids = []
             for item in ids:
@@ -143,4 +156,9 @@ class QdrantStore(BaseVectorStore):
                     point_ids.append(item)
                 except ValueError:
                     point_ids.append(str(uuid.uuid5(uuid.NAMESPACE_DNS, item)))
-            self._client.delete(collection_name=self._collection_name, points_selector=point_ids)
+            self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=PointIdsList(points=point_ids),
+            )
+            logger.info(f"Deleted {len(point_ids)} points from collection '{self._collection_name}'")
+

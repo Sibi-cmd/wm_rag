@@ -1,15 +1,32 @@
+# === Core Framework ===
 fastapi
-uvicorn
-boto3
-psycopg2-binary
-langchain
-langchain-community
+uvicorn[standard]
+
+# === RAG Pipeline ===
+langchain>=0.1.0
+langchain-community>=0.0.10
 langchain-huggingface
-langchain-text-splitters
-sentence-transformers
-pypdf
-python-dotenv
-mistralai
-pinecone
-redis
-tiktoken
+langchain-text-splitters>=0.0.1
+sentence-transformers>=2.2.2
+tiktoken>=0.5.0
+
+# === LLM Provider ===
+google-genai>=1.0.0
+
+# === Vector Store ===
+qdrant-client>=1.7.0
+
+# === Document Processing ===
+pypdf>=3.17.0
+
+# === Database Clients ===
+pymongo>=4.0.0
+redis>=4.0.0
+
+# === HTTP & Config ===
+httpx>=0.24.0
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# === Cloud Storage (optional) ===
+boto3
