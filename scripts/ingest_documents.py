@@ -37,6 +37,7 @@ def ingest_documents(
     category: str = None,
     zone: str = None,
     rack: str = None,
+    shelf: str = None,
     bin: str = None,
     clear_existing: bool = False,
     collection_name: str = "warehouse-index"
@@ -149,6 +150,7 @@ def ingest_documents(
                 "category": category or "Unknown",
                 "zone": zone or "Unknown",
                 "rack": rack or "Unknown",
+                "shelf": shelf or "Unknown",
                 "bin": bin or "Unknown",
                 "source_file": s3_key or os.path.basename(target_path),
                 "section": chunk.get('section', 'General'),
@@ -173,7 +175,7 @@ def ingest_documents(
                 PointStruct(
                     id=point_uuid,
                     vector=embedding,
-                    payload={"metadata": metadata}
+                    payload={"metadata": metadata, **metadata}
                 )
             )
 
@@ -198,7 +200,7 @@ def ingest_documents(
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python scripts/ingest_documents.py <file_path_or_s3_key> <document_type> [clear_existing=False] [warehouse_id] [sku] [product_id] [category] [zone] [rack] [bin]")
+        print("Usage: python scripts/ingest_documents.py <file_path_or_s3_key> <document_type> [clear_existing=False] [warehouse_id] [sku] [product_id] [category] [zone] [rack] [shelf] [bin]")
         sys.exit(1)
     
     source = sys.argv[1]
@@ -213,7 +215,8 @@ if __name__ == "__main__":
     cat_val = sys.argv[7] if len(sys.argv) > 7 else None
     zone_val = sys.argv[8] if len(sys.argv) > 8 else None
     rack_val = sys.argv[9] if len(sys.argv) > 9 else None
-    bin_val = sys.argv[10] if len(sys.argv) > 10 else None
+    shelf_val = sys.argv[10] if len(sys.argv) > 10 else None
+    bin_val = sys.argv[11] if len(sys.argv) > 11 else None
 
     # Determine if source is local or S3 key
     is_local = os.path.exists(source) or source.startswith("data/") or "/" in source or "\\" in source
@@ -226,6 +229,7 @@ if __name__ == "__main__":
         "category": cat_val,
         "zone": zone_val,
         "rack": rack_val,
+        "shelf": shelf_val,
         "bin": bin_val
     }
     if is_local:

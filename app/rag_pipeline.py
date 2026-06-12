@@ -73,6 +73,14 @@ class RAGPipeline:
         self,
         query: str,
         document_type: Optional[str] = None,
+        sku: Optional[str] = None,
+        product_id: Optional[str] = None,
+        category: Optional[str] = None,
+        warehouse_id: Optional[str] = None,
+        zone: Optional[str] = None,
+        rack: Optional[str] = None,
+        shelf: Optional[str] = None,
+        bin: Optional[str] = None,
         audit_trail_text: str = "",
         attempt_count: int = 1,
         prev_response: Optional[str] = None,
@@ -83,10 +91,25 @@ class RAGPipeline:
         Coordinates full RAG flow: Retrieval -> Reranking -> LLM Query Generation
         Returns a tuple: (suggestion, confidence, predicted_category, ocr_document_id)
         """
-        # Convert document_type filter for Qdrant
         filters = {}
         if document_type:
-            filters["metadata.document_type"] = document_type
+            filters["document_type"] = document_type
+        if sku:
+            filters["sku"] = sku
+        if product_id:
+            filters["product_id"] = product_id
+        if category:
+            filters["category"] = category
+        if warehouse_id:
+            filters["warehouse_id"] = warehouse_id
+        if zone:
+            filters["zone"] = zone
+        if rack:
+            filters["rack"] = rack
+        if shelf:
+            filters["shelf"] = shelf
+        if bin:
+            filters["bin"] = bin
 
         # 1. Retrieve initial candidates using embedder + vector store components
         query_vector = self.core_pipeline.embedder.embed(query)

@@ -76,18 +76,24 @@ class QdrantStore(BaseVectorStore):
                 batch = points[i : i + batch_size]
                 self._client.upsert(collection_name=self._collection_name, points=batch)
 
+    @staticmethod
+    def build_qdrant_filter(filters: Dict[str, Any]) -> Optional[Filter]:
+        if not filters:
+            return None
+        conditions = []
+        for k, v in filters.items():
+            if v is not None:
+                key = k if k.startswith("metadata.") else f"metadata.{k}"
+                conditions.append(FieldCondition(key=key, match=MatchValue(value=v)))
+        return Filter(must=conditions) if conditions else None
+
     def search(
         self,
         vector: List[float],
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[SearchResult]:
-        query_filter = None
-        if filters:
-            conditions = []
-            for k, v in filters.items():
-                conditions.append(FieldCondition(key=k, match=MatchValue(value=v)))
-            query_filter = Filter(must=conditions)
+        query_filter = self.build_qdrant_filter(filters) if filters else None
 
         try:
             results = self._client.query_points(

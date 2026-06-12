@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+from typing import List
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 
 from .models import (
     WarehouseRequest, WarehouseResponse, WarehouseGatewayQuery, WarehouseGatewayResponse,
-    IngestRequest
+    IngestRequest, DocumentListItem, DocumentDetailResponse, CollectionStatsResponse, ChunkDetail
 )
 from .database import get_redis_client, get_mongodb_db, get_qdrant_client
 from .rag_pipeline import RAGPipeline
@@ -153,10 +154,23 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     if not prev_response:
         prev_response = request.previousResponse
 
+    # Extract filters with camelCase / snake_case backward compatibility
+    doc_type = request.document_type or request.documentType
+    prod_id = request.product_id or request.productId
+    wh_id = request.warehouse_id or request.warehouseId
+
     # Execute modular RAG Flow
     suggestion, final_confidence, predicted_category, top_ocr_doc_id = await rag_pipeline.execute(
         query=search_query,
-        document_type=request.documentType,
+        document_type=doc_type,
+        sku=request.sku,
+        product_id=prod_id,
+        category=request.category,
+        warehouse_id=wh_id,
+        zone=request.zone,
+        rack=request.rack,
+        shelf=request.shelf,
+        bin=request.bin,
         audit_trail_text=audit_trail_text,
         attempt_count=request.attemptCount,
         prev_response=prev_response,
@@ -257,9 +271,15 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
 @app.post("/api/rag/ingest", response_model=dict, summary="Ingest OCR document text", description="Chunk OCR text, embed, and store in Qdrant warehouse-index.")
 async def rag_ingest(request: IngestRequest):
     # Initialize components
-    global rag_pipeline
+    global rag_pipeline, mongo_db
     if rag_pipeline is None:
         rag_pipeline = RAGPipeline()
+    if mongo_db is None:
+        try:
+            mongo_db = get_mongodb_db()
+        except Exception as e:
+            logger.warning(f"Failed to connect to MongoDB during ingestion: {e}")
+
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         model_name="gpt-3.5-turbo",
         chunk_size=500,
@@ -276,9 +296,43 @@ async def rag_ingest(request: IngestRequest):
             "ocr_document_id": request.ocr_document_id,
             "document_type": request.document_type,
             "warehouse_id": request.warehouse_id,
+            "sku": request.sku,
+            "product_id": request.product_id,
+            "category": request.category,
+            "zone": request.zone,
+            "rack": request.rack,
+            "shelf": request.shelf,
+            "bin": request.bin,
             "chunk_index": idx,
             "text": chunk_text,
         }
+
+        # Upsert into MongoDB for local chunk tracking
+        if mongo_db is not None:
+            try:
+                mongo_db.chunks.update_one(
+                    {"chunk_id": f"{request.ocr_document_id}_{idx}"},
+                    {"$set": {
+                        "chunk_id": f"{request.ocr_document_id}_{idx}",
+                        "ocr_document_id": request.ocr_document_id,
+                        "document_type": request.document_type,
+                        "warehouse_id": request.warehouse_id,
+                        "sku": request.sku,
+                        "product_id": request.product_id,
+                        "category": request.category,
+                        "zone": request.zone,
+                        "rack": request.rack,
+                        "shelf": request.shelf,
+                        "bin": request.bin,
+                        "chunk_index": idx,
+                        "text": chunk_text,
+                        "updated_at": datetime.now(timezone.utc)
+                    }},
+                    upsert=True
+                )
+            except Exception as mongo_err:
+                logger.warning(f"[MongoDB] Chunk log error: {mongo_err}")
+
         # Use same payload structure as core pipeline for consistency
         points.append(PointStruct(id=point_uuid, vector=embedding, payload={"metadata": metadata, **metadata}))
         # batch upsert every 50 points
@@ -293,3 +347,172 @@ async def rag_ingest(request: IngestRequest):
 @app.get("/status", summary="Get service status", description="Returns connection and activation status of the RAG service components.")
 async def get_status():
     return {"status": "active", "integration": "Warehouse RAG Service"}
+
+@app.get("/api/rag/documents", response_model=List[DocumentListItem], summary="List all indexed documents")
+async def list_documents():
+    global mongo_db
+    if mongo_db is None:
+        mongo_db = get_mongodb_db()
+
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$ocr_document_id",
+                "chunk_count": {"$sum": 1},
+                "document_type": {"$first": "$document_type"},
+                "warehouse_id": {"$first": "$warehouse_id"},
+                "sku": {"$first": "$sku"},
+                "product_id": {"$first": "$product_id"},
+                "category": {"$first": "$category"},
+                "zone": {"$first": "$zone"},
+                "rack": {"$first": "$rack"},
+                "shelf": {"$first": "$shelf"},
+                "bin": {"$first": "$bin"},
+                "updated_at": {"$max": "$updated_at"}
+            }
+        }
+    ]
+    try:
+        results = list(mongo_db.chunks.aggregate(pipeline))
+    except Exception as e:
+        logger.error(f"[MongoDB] Failed to aggregate documents: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database aggregation error: {str(e)}"
+        )
+
+    documents = []
+    for item in results:
+        documents.append(
+            DocumentListItem(
+                ocr_document_id=item["_id"],
+                document_type=item.get("document_type"),
+                warehouse_id=item.get("warehouse_id"),
+                sku=item.get("sku"),
+                product_id=item.get("product_id"),
+                category=item.get("category"),
+                zone=item.get("zone"),
+                rack=item.get("rack"),
+                shelf=item.get("shelf"),
+                bin=item.get("bin"),
+                chunk_count=item["chunk_count"],
+                updated_at=item.get("updated_at")
+            )
+        )
+    return documents
+
+@app.get("/api/rag/documents/{document_id}", response_model=DocumentDetailResponse, summary="Get document details and chunks")
+async def get_document_details(document_id: str):
+    global mongo_db
+    if mongo_db is None:
+        mongo_db = get_mongodb_db()
+
+    try:
+        chunks_cursor = mongo_db.chunks.find({"ocr_document_id": document_id}).sort("chunk_index", 1)
+        chunks = list(chunks_cursor)
+    except Exception as e:
+        logger.error(f"[MongoDB] Failed to query chunks for {document_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query error: {str(e)}"
+        )
+
+    if not chunks:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found."
+        )
+
+    first_chunk = chunks[0]
+    chunk_list = [
+        ChunkDetail(
+            chunk_id=c["chunk_id"],
+            chunk_index=c.get("chunk_index", 0),
+            text=c.get("text", "")
+        )
+        for c in chunks
+    ]
+
+    return DocumentDetailResponse(
+        ocr_document_id=document_id,
+        document_type=first_chunk.get("document_type"),
+        warehouse_id=first_chunk.get("warehouse_id"),
+        sku=first_chunk.get("sku"),
+        product_id=first_chunk.get("product_id"),
+        category=first_chunk.get("category"),
+        zone=first_chunk.get("zone"),
+        rack=first_chunk.get("rack"),
+        shelf=first_chunk.get("shelf"),
+        bin=first_chunk.get("bin"),
+        chunks=chunk_list
+    )
+
+@app.delete("/api/rag/documents/{document_id}", summary="Delete document vectors and metadata")
+async def delete_document(document_id: str):
+    global mongo_db
+    if mongo_db is None:
+        mongo_db = get_mongodb_db()
+
+    # 1. Delete vectors from Qdrant
+    try:
+        qdrant_client = get_qdrant_client()
+        from qdrant_client.models import FilterSelector, Filter, FieldCondition, MatchValue
+        qdrant_client.delete(
+            collection_name="warehouse-index",
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="metadata.ocr_document_id",
+                            match=MatchValue(value=document_id)
+                        )
+                    ]
+                )
+            )
+        )
+    except Exception as q_err:
+        logger.warning(f"[Qdrant] Failed to delete points for document {document_id}: {q_err}")
+
+    # 2. Delete related MongoDB records
+    try:
+        delete_result = mongo_db.chunks.delete_many({"ocr_document_id": document_id})
+        deleted_count = delete_result.deleted_count
+    except Exception as m_err:
+        logger.error(f"[MongoDB] Failed to delete chunks for {document_id}: {m_err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database deletion error: {str(m_err)}"
+        )
+
+    return {"status": "SUCCESS", "deleted_count": deleted_count}
+
+@app.get("/api/rag/collections/stats", response_model=CollectionStatsResponse, summary="Get database and vector statistics")
+async def get_collections_stats():
+    global mongo_db
+    if mongo_db is None:
+        mongo_db = get_mongodb_db()
+
+    # 1. Total unique documents & chunks in MongoDB
+    try:
+        total_documents = len(mongo_db.chunks.distinct("ocr_document_id"))
+        total_chunks = mongo_db.chunks.count_documents({})
+    except Exception as e:
+        logger.error(f"[MongoDB] Failed to count stats: {e}")
+        total_documents = 0
+        total_chunks = 0
+
+    # 2. Total points in Qdrant warehouse-index
+    vector_count = 0
+    try:
+        qdrant_client = get_qdrant_client()
+        collection_info = qdrant_client.get_collection(collection_name="warehouse-index")
+        vector_count = collection_info.points_count
+    except Exception as q_err:
+        logger.warning(f"[Qdrant] Failed to fetch collection info: {q_err}")
+
+    return CollectionStatsResponse(
+        collection_name="warehouse-index",
+        total_documents=total_documents,
+        total_chunks=total_chunks,
+        vector_count=vector_count
+    )
