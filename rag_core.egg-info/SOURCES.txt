@@ -24,4 +24,5 @@ rag_core/rerankers/warehouse.py
 rag_core/vector_stores/__init__.py
 rag_core/vector_stores/base.py
 rag_core/vector_stores/qdrant_store.py
+tests/test_document_apis.py
 tests/test_pipeline.py

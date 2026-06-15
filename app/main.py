@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 
 from .models import (
     WarehouseRequest, WarehouseResponse, WarehouseGatewayQuery, WarehouseGatewayResponse,
-    IngestRequest, DocumentListItem, DocumentDetailResponse, CollectionStatsResponse, ChunkDetail
+    IngestRequest, DocumentListItem, DocumentDetailResponse, CollectionStatsResponse,
+    ChunkDetail, DocumentDeleteResponse, DocumentMetadata
 )
 from .database import get_redis_client, get_mongodb_db, get_qdrant_client
 from .rag_pipeline import RAGPipeline
@@ -351,82 +352,184 @@ async def get_status():
 @app.get("/api/rag/documents", response_model=List[DocumentListItem], summary="List all indexed documents")
 async def list_documents():
     global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
+    results = []
+    mongo_success = False
 
-    pipeline = [
-        {
-            "$group": {
-                "_id": "$ocr_document_id",
-                "chunk_count": {"$sum": 1},
-                "document_type": {"$first": "$document_type"},
-                "warehouse_id": {"$first": "$warehouse_id"},
-                "sku": {"$first": "$sku"},
-                "product_id": {"$first": "$product_id"},
-                "category": {"$first": "$category"},
-                "zone": {"$first": "$zone"},
-                "rack": {"$first": "$rack"},
-                "shelf": {"$first": "$shelf"},
-                "bin": {"$first": "$bin"},
-                "updated_at": {"$max": "$updated_at"}
-            }
-        }
-    ]
     try:
+        if mongo_db is None:
+            mongo_db = get_mongodb_db(ping=False)
+        pipeline = [
+            {
+                "$group": {
+                    "_id": "$ocr_document_id",
+                    "chunk_count": {"$sum": 1},
+                    "document_type": {"$first": "$document_type"},
+                    "warehouse_id": {"$first": "$warehouse_id"},
+                    "sku": {"$first": "$sku"},
+                    "zone": {"$first": "$zone"},
+                    "rack": {"$first": "$rack"},
+                    "shelf": {"$first": "$shelf"},
+                    "bin": {"$first": "$bin"}
+                }
+            }
+        ]
         results = list(mongo_db.chunks.aggregate(pipeline))
+        mongo_success = True
     except Exception as e:
-        logger.error(f"[MongoDB] Failed to aggregate documents: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database aggregation error: {str(e)}"
-        )
+        logger.warning(f"[MongoDB] Failed to aggregate documents, falling back to Qdrant: {e}")
 
     documents = []
-    for item in results:
-        documents.append(
-            DocumentListItem(
-                ocr_document_id=item["_id"],
-                document_type=item.get("document_type"),
-                warehouse_id=item.get("warehouse_id"),
-                sku=item.get("sku"),
-                product_id=item.get("product_id"),
-                category=item.get("category"),
-                zone=item.get("zone"),
-                rack=item.get("rack"),
-                shelf=item.get("shelf"),
-                bin=item.get("bin"),
-                chunk_count=item["chunk_count"],
-                updated_at=item.get("updated_at")
+
+    if mongo_success and results:
+        for item in results:
+            documents.append(
+                DocumentListItem(
+                    document_id=item["_id"],
+                    document_type=item.get("document_type"),
+                    warehouse_id=item.get("warehouse_id"),
+                    sku=item.get("sku"),
+                    zone=item.get("zone"),
+                    rack=item.get("rack"),
+                    shelf=item.get("shelf"),
+                    bin=item.get("bin"),
+                    chunk_count=item["chunk_count"]
+                )
             )
-        )
+    else:
+        # Fallback to Qdrant Scroll Strategy
+        try:
+            qdrant_client = get_qdrant_client()
+            offset = None
+            doc_map = {}
+            while True:
+                scroll_res = qdrant_client.scroll(
+                    collection_name="warehouse-index",
+                    limit=100,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset
+                )
+                records, offset = scroll_res
+                for record in records:
+                    payload = record.payload or {}
+                    meta = payload.get("metadata", payload)
+                    doc_id = meta.get("ocr_document_id") or meta.get("document_id")
+                    if not doc_id:
+                        continue
+                    if doc_id not in doc_map:
+                        doc_map[doc_id] = {
+                            "document_id": doc_id,
+                            "document_type": meta.get("document_type"),
+                            "warehouse_id": meta.get("warehouse_id"),
+                            "sku": meta.get("sku"),
+                            "zone": meta.get("zone"),
+                            "rack": meta.get("rack"),
+                            "shelf": meta.get("shelf"),
+                            "bin": meta.get("bin"),
+                            "chunk_count": 0
+                        }
+                    doc_map[doc_id]["chunk_count"] += 1
+                if offset is None:
+                    break
+            
+            for doc in doc_map.values():
+                documents.append(DocumentListItem(**doc))
+        except Exception as q_err:
+            logger.error(f"[Qdrant] Failed to scroll collection: {q_err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve documents from storage: {str(q_err)}"
+            )
+
     return documents
 
 @app.get("/api/rag/documents/{document_id}", response_model=DocumentDetailResponse, summary="Get document details and chunks")
 async def get_document_details(document_id: str):
     global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
+    chunks = []
+    mongo_success = False
 
     try:
+        if mongo_db is None:
+            mongo_db = get_mongodb_db(ping=False)
         chunks_cursor = mongo_db.chunks.find({"ocr_document_id": document_id}).sort("chunk_index", 1)
         chunks = list(chunks_cursor)
+        mongo_success = True
     except Exception as e:
-        logger.error(f"[MongoDB] Failed to query chunks for {document_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database query error: {str(e)}"
-        )
+        logger.warning(f"[MongoDB] Failed to retrieve document details, falling back to Qdrant: {e}")
 
-    if not chunks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Document with ID {document_id} not found."
-        )
+    if not mongo_success or not chunks:
+        # Fallback to Qdrant Scroll with filter
+        try:
+            qdrant_client = get_qdrant_client()
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            
+            filter_cond = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.ocr_document_id",
+                        match=MatchValue(value=document_id)
+                    )
+                ]
+            )
+            
+            offset = None
+            q_chunks = []
+            while True:
+                scroll_res = qdrant_client.scroll(
+                    collection_name="warehouse-index",
+                    scroll_filter=filter_cond,
+                    limit=100,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset
+                )
+                records, offset = scroll_res
+                for record in records:
+                    payload = record.payload or {}
+                    meta = payload.get("metadata", payload)
+                    q_chunks.append(meta)
+                if offset is None:
+                    break
+            
+            if not q_chunks:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Document with ID {document_id} not found."
+                )
+            
+            # Sort the Qdrant records by chunk_index
+            q_chunks.sort(key=lambda x: int(x.get("chunk_index", 0)))
+            
+            first_chunk = q_chunks[0]
+            chunk_list = [
+                ChunkDetail(
+                    chunk_index=int(c.get("chunk_index", 0)),
+                    text=c.get("text", "")
+                )
+                for c in q_chunks
+            ]
+            
+            return DocumentDetailResponse(
+                metadata=DocumentMetadata(
+                    document_id=document_id,
+                    document_type=first_chunk.get("document_type"),
+                    warehouse_id=first_chunk.get("warehouse_id")
+                ),
+                chunks=chunk_list
+            )
+        except HTTPException:
+            raise
+        except Exception as q_err:
+            logger.error(f"[Qdrant] Scroll error for document {document_id}: {q_err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve document details: {str(q_err)}"
+            )
 
     first_chunk = chunks[0]
     chunk_list = [
         ChunkDetail(
-            chunk_id=c["chunk_id"],
             chunk_index=c.get("chunk_index", 0),
             text=c.get("text", "")
         )
@@ -434,24 +537,19 @@ async def get_document_details(document_id: str):
     ]
 
     return DocumentDetailResponse(
-        ocr_document_id=document_id,
-        document_type=first_chunk.get("document_type"),
-        warehouse_id=first_chunk.get("warehouse_id"),
-        sku=first_chunk.get("sku"),
-        product_id=first_chunk.get("product_id"),
-        category=first_chunk.get("category"),
-        zone=first_chunk.get("zone"),
-        rack=first_chunk.get("rack"),
-        shelf=first_chunk.get("shelf"),
-        bin=first_chunk.get("bin"),
+        metadata=DocumentMetadata(
+            document_id=document_id,
+            document_type=first_chunk.get("document_type"),
+            warehouse_id=first_chunk.get("warehouse_id")
+        ),
         chunks=chunk_list
     )
 
-@app.delete("/api/rag/documents/{document_id}", summary="Delete document vectors and metadata")
+@app.delete("/api/rag/documents/{document_id}", response_model=DocumentDeleteResponse, summary="Delete document vectors and metadata")
 async def delete_document(document_id: str):
     global mongo_db
     if mongo_db is None:
-        mongo_db = get_mongodb_db()
+        mongo_db = get_mongodb_db(ping=False)
 
     # 1. Delete vectors from Qdrant
     try:
@@ -472,6 +570,10 @@ async def delete_document(document_id: str):
         )
     except Exception as q_err:
         logger.warning(f"[Qdrant] Failed to delete points for document {document_id}: {q_err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete points from vector store: {str(q_err)}"
+        )
 
     # 2. Delete related MongoDB records
     try:
@@ -484,35 +586,69 @@ async def delete_document(document_id: str):
             detail=f"Database deletion error: {str(m_err)}"
         )
 
-    return {"status": "SUCCESS", "deleted_count": deleted_count}
+    return DocumentDeleteResponse(
+        status="SUCCESS",
+        document_id=document_id
+    )
 
 @app.get("/api/rag/collections/stats", response_model=CollectionStatsResponse, summary="Get database and vector statistics")
 async def get_collections_stats():
     global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
-
-    # 1. Total unique documents & chunks in MongoDB
-    try:
-        total_documents = len(mongo_db.chunks.distinct("ocr_document_id"))
-        total_chunks = mongo_db.chunks.count_documents({})
-    except Exception as e:
-        logger.error(f"[MongoDB] Failed to count stats: {e}")
-        total_documents = 0
-        total_chunks = 0
-
-    # 2. Total points in Qdrant warehouse-index
+    
+    # 1. Total points in Qdrant warehouse-index
     vector_count = 0
+    collection_name = "warehouse-index"
     try:
         qdrant_client = get_qdrant_client()
-        collection_info = qdrant_client.get_collection(collection_name="warehouse-index")
+        collection_info = qdrant_client.get_collection(collection_name=collection_name)
         vector_count = collection_info.points_count
     except Exception as q_err:
         logger.warning(f"[Qdrant] Failed to fetch collection info: {q_err}")
 
+    # 2. Total unique documents & chunks in MongoDB
+    total_documents = 0
+    total_chunks = 0
+    mongo_success = False
+    try:
+        if mongo_db is None:
+            mongo_db = get_mongodb_db(ping=False)
+        total_documents = len(mongo_db.chunks.distinct("ocr_document_id"))
+        total_chunks = mongo_db.chunks.count_documents({})
+        mongo_success = True
+    except Exception as e:
+        logger.warning(f"[MongoDB] Failed to count stats: {e}")
+
+    # Fallback to estimating stats from Qdrant if MongoDB is down or empty, but Qdrant has vectors
+    if (not mongo_success or total_chunks == 0) and vector_count > 0:
+        try:
+            qdrant_client = get_qdrant_client()
+            offset = None
+            unique_docs = set()
+            while True:
+                scroll_res = qdrant_client.scroll(
+                    collection_name=collection_name,
+                    limit=100,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset
+                )
+                records, offset = scroll_res
+                for record in records:
+                    payload = record.payload or {}
+                    meta = payload.get("metadata", payload)
+                    doc_id = meta.get("ocr_document_id") or meta.get("document_id")
+                    if doc_id:
+                        unique_docs.add(doc_id)
+                if offset is None:
+                    break
+            total_documents = len(unique_docs)
+            total_chunks = vector_count
+        except Exception as q_err:
+            logger.warning(f"[Qdrant] Scroll estimation failed: {q_err}")
+
     return CollectionStatsResponse(
-        collection_name="warehouse-index",
+        collection_name=collection_name,
         total_documents=total_documents,
-        total_chunks=total_chunks,
+        total_chunks=total_chunks or vector_count,
         vector_count=vector_count
     )

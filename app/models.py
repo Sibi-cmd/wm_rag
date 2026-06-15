@@ -85,38 +85,36 @@ class IngestRequest(BaseModel):
 
 
 class DocumentListItem(BaseModel):
-    ocr_document_id: str
+    document_id: str
     document_type: Optional[str] = None
     warehouse_id: Optional[str] = None
     sku: Optional[str] = None
-    product_id: Optional[str] = None
-    category: Optional[str] = None
     zone: Optional[str] = None
     rack: Optional[str] = None
     shelf: Optional[str] = None
     bin: Optional[str] = None
     chunk_count: int
-    updated_at: Optional[datetime] = None
+
+
+class DocumentMetadata(BaseModel):
+    document_id: str
+    document_type: Optional[str] = None
+    warehouse_id: Optional[str] = None
 
 
 class ChunkDetail(BaseModel):
-    chunk_id: str
     chunk_index: int
     text: str
 
 
 class DocumentDetailResponse(BaseModel):
-    ocr_document_id: str
-    document_type: Optional[str] = None
-    warehouse_id: Optional[str] = None
-    sku: Optional[str] = None
-    product_id: Optional[str] = None
-    category: Optional[str] = None
-    zone: Optional[str] = None
-    rack: Optional[str] = None
-    shelf: Optional[str] = None
-    bin: Optional[str] = None
+    metadata: DocumentMetadata
     chunks: List[ChunkDetail]
+
+
+class DocumentDeleteResponse(BaseModel):
+    status: str = "SUCCESS"
+    document_id: str
 
 
 class CollectionStatsResponse(BaseModel):

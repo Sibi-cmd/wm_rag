@@ -35,7 +35,7 @@ class TestDocumentAPIs:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["ocr_document_id"] == "doc-999"
+        assert data[0]["document_id"] == "doc-999"
         assert data[0]["chunk_count"] == 3
         assert data[0]["sku"] == "SKU-999"
 
@@ -64,14 +64,20 @@ class TestDocumentAPIs:
         response = client.get("/api/rag/documents/doc-999")
         assert response.status_code == 200
         data = response.json()
-        assert data["ocr_document_id"] == "doc-999"
+        assert data["metadata"]["document_id"] == "doc-999"
         assert len(data["chunks"]) == 2
-        assert data["chunks"][0]["chunk_id"] == "doc-999_0"
+        assert data["chunks"][0]["chunk_index"] == 0
         assert data["chunks"][0]["text"] == "First chunk text details"
 
+    @patch("app.main.get_qdrant_client")
     @patch("app.main.mongo_db")
-    def test_get_document_details_not_found(self, mock_mongo):
+    def test_get_document_details_not_found(self, mock_mongo, mock_get_qdrant):
         mock_mongo.chunks.find.return_value.sort.return_value = []
+        
+        # Mock Qdrant client scroll returning empty chunks
+        mock_qdrant = MagicMock()
+        mock_qdrant.scroll.return_value = ([], None)
+        mock_get_qdrant.return_value = mock_qdrant
 
         response = client.get("/api/rag/documents/doc-missing")
         assert response.status_code == 404
@@ -91,7 +97,7 @@ class TestDocumentAPIs:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "SUCCESS"
-        assert data["deleted_count"] == 5
+        assert data["document_id"] == "doc-999"
 
         # Verify Qdrant and Mongo delete calls
         mock_qdrant.delete.assert_called_once()
