@@ -20,7 +20,8 @@ qdrant-client>=1.7.0
 pypdf>=3.17.0
 
 # === Database Clients ===
-pymongo>=4.0.0
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.0
 redis>=4.0.0
 
 # === HTTP & Config ===

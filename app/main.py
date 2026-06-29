@@ -14,7 +14,8 @@ from .models import (
     WarehouseRequest, WarehouseResponse, WarehouseGatewayQuery, WarehouseGatewayResponse,
     IngestRequest, DocumentListItem, DocumentDetailResponse, CollectionStatsResponse, ChunkDetail
 )
-from .database import get_redis_client, get_mongodb_db, get_qdrant_client
+from .database import get_redis_client, get_db_session, get_qdrant_client
+from .db_models import OCRDocumentModel
 from .rag_pipeline import RAGPipeline
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client.models import PointStruct
@@ -30,26 +31,16 @@ ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localh
 
 rag_pipeline = None
 redis_client = None
-mongo_db = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag_pipeline, redis_client, mongo_db
-    logger.info("Starting Warehouse AI service with Qdrant, MongoDB, Redis, and Gemini...")
-    try:
-        redis_client = get_redis_client(ping=False)
-    except Exception as e:
-        logger.warning(f"Failed to connect to Redis during startup: {e}. Will attempt lazy reconnection.")
-    
-    try:
-        mongo_db = get_mongodb_db(ping=False)
-    except Exception as e:
-        logger.warning(f"Failed to connect to MongoDB during startup: {e}. Will attempt lazy reconnection.")
+    global rag_pipeline, redis_client
+    logger.info("Starting Warehouse AI service with Qdrant, PostgreSQL, Redis, and Gemini...")
+    # Redis is disabled to prevent connection hangs
+    redis_client = None
 
-    try:
-        rag_pipeline = RAGPipeline()
-    except Exception as e:
-        logger.warning(f"Failed to initialize RAGPipeline during startup: {e}. Will attempt lazy initialization.")
+    # Lazy initialize RAGPipeline on first request to avoid PyTorch deadlock under ASGI/Uvicorn lifespan
+    logger.info("RAGPipeline will be initialized lazily on the first request to prevent event loop deadlocks.")
         
     logger.info("AI Service is ready.")
     yield
@@ -93,13 +84,12 @@ async def save_response_to_gateway(response_data: WarehouseGatewayResponse):
 
 @app.post("/api/ai/analyze", response_model=WarehouseResponse, summary="Analyze warehouse documents", description="Performs vector retrieval and LLM synthesis on warehouse domain questions.")
 async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundTasks):
-    global rag_pipeline, redis_client, mongo_db
+    global rag_pipeline, redis_client
     if rag_pipeline is None:
         rag_pipeline = RAGPipeline()
-    if redis_client is None:
-        redis_client = get_redis_client()
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
+    
+    # Redis is disabled to prevent connection hangs
+    redis_client = None
 
     logger.info(f"Received analyze request: ocrDocumentId={request.ocrDocumentId} | attemptCount={request.attemptCount} | warehouseId={request.warehouseId}")
 
@@ -109,7 +99,7 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     cache_key = f"warehouse_cache:{request.ocrDocumentId}:{request.warehouseId}:{desc_hash}:{request.attemptCount}"
     
     try:
-        cached_data = redis_client.get(cache_key)
+        cached_data = redis_client.get(cache_key) if redis_client else None
         if cached_data:
             logger.info(f"[Redis] Cache hit for document {request.ocrDocumentId}")
             return WarehouseResponse(**json.loads(cached_data))
@@ -126,12 +116,13 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     if request.ocrDocumentId:
         if audit_trail_text:
             try:
-                redis_client.setex(f"audit_trail:{request.ocrDocumentId}", 86400, audit_trail_text)
+                if redis_client:
+                    redis_client.setex(f"audit_trail:{request.ocrDocumentId}", 86400, audit_trail_text)
             except Exception as e:
                 logger.debug(f"[Redis] Audit trail store error: {e}")
         else:
             try:
-                cached_trail = redis_client.get(f"audit_trail:{request.ocrDocumentId}")
+                cached_trail = redis_client.get(f"audit_trail:{request.ocrDocumentId}") if redis_client else None
                 if cached_trail:
                     audit_trail_text = cached_trail if isinstance(cached_trail, str) else cached_trail.decode('utf-8')
             except Exception as e:
@@ -141,7 +132,7 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     prev_response = None
     if request.attemptCount > 1 and request.ocrDocumentId:
         try:
-            stored = redis_client.get(f"prev_response:{request.ocrDocumentId}")
+            stored = redis_client.get(f"prev_response:{request.ocrDocumentId}") if redis_client else None
             if stored:
                 try:
                     stored_str = stored if isinstance(stored, str) else stored.decode('utf-8')
@@ -158,6 +149,27 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     doc_type = request.document_type or request.documentType
     prod_id = request.product_id or request.productId
     wh_id = request.warehouse_id or request.warehouseId
+
+    # Look up WMS metadata filters in PostgreSQL if ocrDocumentId is provided
+    if request.ocrDocumentId:
+        try:
+            db = get_db_session()
+            try:
+                doc = db.query(OCRDocumentModel).filter(OCRDocumentModel.id == request.ocrDocumentId).first()
+                if doc:
+                    doc_type = doc_type or doc.document_type
+                    wh_id = wh_id or doc.warehouse_id
+                    request.sku = request.sku or doc.sku
+                    prod_id = prod_id or doc.product_id
+                    request.category = request.category or doc.category
+                    request.zone = request.zone or doc.zone
+                    request.rack = request.rack or doc.rack
+                    request.shelf = request.shelf or doc.shelf
+                    request.bin = request.bin or doc.bin
+            finally:
+                db.close()
+        except Exception as db_err:
+            logger.warning(f"[Database] Failed to look up metadata for {request.ocrDocumentId}: {db_err}")
 
     # Execute modular RAG Flow
     suggestion, final_confidence, predicted_category, top_ocr_doc_id = await rag_pipeline.execute(
@@ -178,33 +190,9 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
         priority=request.priority
     )
 
-    # Persistence to local MongoDB and outer Gateway (via BackgroundTasks for safety)
+    # Persistence to outer Gateway (via BackgroundTasks for safety)
     async def persist():
-        try:
-            # 1. MongoDB Local logging
-            mongo_db.queries.insert_one({
-                "userId": request.userId,
-                "warehouseId": request.warehouseId,
-                "documentType": request.documentType or "Unknown",
-                "question": search_query,
-                "timestamp": datetime.now(timezone.utc)
-            })
-            mongo_db.responses.insert_one({
-                "userId": request.userId,
-                "warehouseId": request.warehouseId,
-                "ocrDocumentId": f"DOC-{request.ocrDocumentId}" if request.ocrDocumentId else top_ocr_doc_id,
-                "answer": suggestion,
-                "confidence": final_confidence,
-                "status": "ANALYZED",
-                "title": request.title or "General",
-                "description": search_query,
-                "timestamp": datetime.now(timezone.utc)
-            })
-            logger.info("[MongoDB] Successfully logged query and response")
-        except Exception as e:
-            logger.error(f"[MongoDB] Persistence error: {e}")
-
-        # 2. External Gateway (using updated WarehouseGatewayQuery and WarehouseGatewayResponse)
+        # External Gateway (using updated WarehouseGatewayQuery and WarehouseGatewayResponse)
         query = await save_query_to_gateway(
             WarehouseGatewayQuery(
                 userId=request.userId,
@@ -240,7 +228,7 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     # Store interaction in Redis for future follow-ups
     if request.ocrDocumentId:
         try:
-            stored = redis_client.get(f"prev_response:{request.ocrDocumentId}")
+            stored = redis_client.get(f"prev_response:{request.ocrDocumentId}") if redis_client else None
             prev_list = []
             if stored:
                 try:
@@ -253,7 +241,8 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
             prev_list.append(entry)
             
             # Keep only the last 2 interactions
-            redis_client.setex(f"prev_response:{request.ocrDocumentId}", 86400, json.dumps(prev_list[-2:]))
+            if redis_client:
+                redis_client.setex(f"prev_response:{request.ocrDocumentId}", 86400, json.dumps(prev_list[-2:]))
             logger.debug(f"[Redis] Stored prev_response key: prev_response:{request.ocrDocumentId}")
         except Exception as e:
             logger.warning(f"[Redis] prev_response store error: {e}")
@@ -261,7 +250,8 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
     # Cache response only if it's a valid complete answer (not insufficient/error)
     if "INSUFFICIENT" not in suggestion and "unavailable" not in suggestion:
         try:
-            redis_client.setex(cache_key, 3600, res_obj.model_dump_json())
+            if redis_client:
+                redis_client.setex(cache_key, 3600, res_obj.model_dump_json())
             logger.debug(f"[Redis] Cached response key: {cache_key}")
         except Exception as e:
             logger.warning(f"[Redis] Cache store error: {e}")
@@ -271,14 +261,9 @@ async def analyze_query(request: WarehouseRequest, background_tasks: BackgroundT
 @app.post("/api/rag/ingest", response_model=dict, summary="Ingest OCR document text", description="Chunk OCR text, embed, and store in Qdrant warehouse-index.")
 async def rag_ingest(request: IngestRequest):
     # Initialize components
-    global rag_pipeline, mongo_db
+    global rag_pipeline
     if rag_pipeline is None:
         rag_pipeline = RAGPipeline()
-    if mongo_db is None:
-        try:
-            mongo_db = get_mongodb_db()
-        except Exception as e:
-            logger.warning(f"Failed to connect to MongoDB during ingestion: {e}")
 
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         model_name="gpt-3.5-turbo",
@@ -307,32 +292,6 @@ async def rag_ingest(request: IngestRequest):
             "text": chunk_text,
         }
 
-        # Upsert into MongoDB for local chunk tracking
-        if mongo_db is not None:
-            try:
-                mongo_db.chunks.update_one(
-                    {"chunk_id": f"{request.ocr_document_id}_{idx}"},
-                    {"$set": {
-                        "chunk_id": f"{request.ocr_document_id}_{idx}",
-                        "ocr_document_id": request.ocr_document_id,
-                        "document_type": request.document_type,
-                        "warehouse_id": request.warehouse_id,
-                        "sku": request.sku,
-                        "product_id": request.product_id,
-                        "category": request.category,
-                        "zone": request.zone,
-                        "rack": request.rack,
-                        "shelf": request.shelf,
-                        "bin": request.bin,
-                        "chunk_index": idx,
-                        "text": chunk_text,
-                        "updated_at": datetime.now(timezone.utc)
-                    }},
-                    upsert=True
-                )
-            except Exception as mongo_err:
-                logger.warning(f"[MongoDB] Chunk log error: {mongo_err}")
-
         # Use same payload structure as core pipeline for consistency
         points.append(PointStruct(id=point_uuid, vector=embedding, payload={"metadata": metadata, **metadata}))
         # batch upsert every 50 points
@@ -342,121 +301,238 @@ async def rag_ingest(request: IngestRequest):
     # upsert any remaining points
     if points:
         rag_pipeline.core_pipeline.vector_store._client.upsert(collection_name="warehouse-index", points=points)
+
+    # Upsert into PostgreSQL for local metadata tracking
+    try:
+        db = get_db_session()
+        try:
+            doc = db.query(OCRDocumentModel).filter(OCRDocumentModel.id == request.ocr_document_id).first()
+            now = datetime.now(timezone.utc)
+            if not doc:
+                # If not exists, insert a new row to support flexible testing/dynamic indexing
+                doc = OCRDocumentModel(
+                    id=request.ocr_document_id,
+                    file_name=f"Ingested Document {request.ocr_document_id}",
+                    file_path="",
+                    document_type=request.document_type,
+                    raw_text=request.text,
+                    processing_status="COMPLETED",
+                    created_at=now,
+                )
+                db.add(doc)
+            
+            # Update all metadata fields and chunk count
+            doc.document_type = request.document_type
+            doc.warehouse_id = request.warehouse_id
+            doc.sku = request.sku
+            doc.product_id = request.product_id
+            doc.category = request.category
+            doc.zone = request.zone
+            doc.rack = request.rack
+            doc.shelf = request.shelf
+            doc.bin = request.bin
+            doc.chunk_count = len(chunk_texts)
+            doc.updated_at = now
+            doc.processing_status = "COMPLETED"
+            
+            db.commit()
+            logger.info(f"[Database] Successfully logged metadata in PostgreSQL for {request.ocr_document_id}")
+        except Exception as db_err:
+            db.rollback()
+            logger.error(f"[Database] Failed to upsert metadata: {db_err}")
+        finally:
+            db.close()
+    except Exception as db_init_err:
+        logger.error(f"[Database] Connection error on ingest metadata logging: {db_init_err}")
+
     return {"status": "SUCCESS", "chunks_created": len(chunk_texts)}
 
 @app.get("/status", summary="Get service status", description="Returns connection and activation status of the RAG service components.")
 async def get_status():
-    return {"status": "active", "integration": "Warehouse RAG Service"}
+    postgres_status = "Connected"
+    try:
+        from sqlalchemy import text
+        db = get_db_session()
+        try:
+            db.execute(text("SELECT 1"))
+        finally:
+            db.close()
+    except Exception as e:
+        postgres_status = f"Failed: {str(e)}"
+
+    qdrant_status = "Connected"
+    try:
+        qdrant_client = get_qdrant_client()
+        qdrant_client.get_collection(collection_name="warehouse-index")
+    except Exception as e:
+        qdrant_status = f"Failed: {str(e)}"
+
+    gemini_status = "Connected"
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        gemini_status = "Failed: GEMINI_API_KEY environment variable is not set"
+
+    # Redis check disabled
+    redis_status = "Disabled (Optional)"
+
+    is_healthy = (
+        postgres_status == "Connected"
+        and qdrant_status == "Connected"
+        and gemini_status == "Connected"
+    )
+    service_status = "active" if is_healthy else "degraded"
+
+    return {
+        "status": service_status,
+        "postgresql": postgres_status,
+        "qdrant": qdrant_status,
+        "gemini": gemini_status,
+        "redis": redis_status,
+        "integration": "Warehouse RAG Service"
+    }
 
 @app.get("/api/rag/documents", response_model=List[DocumentListItem], summary="List all indexed documents")
 async def list_documents():
-    global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
-
-    pipeline = [
-        {
-            "$group": {
-                "_id": "$ocr_document_id",
-                "chunk_count": {"$sum": 1},
-                "document_type": {"$first": "$document_type"},
-                "warehouse_id": {"$first": "$warehouse_id"},
-                "sku": {"$first": "$sku"},
-                "product_id": {"$first": "$product_id"},
-                "category": {"$first": "$category"},
-                "zone": {"$first": "$zone"},
-                "rack": {"$first": "$rack"},
-                "shelf": {"$first": "$shelf"},
-                "bin": {"$first": "$bin"},
-                "updated_at": {"$max": "$updated_at"}
-            }
-        }
-    ]
     try:
-        results = list(mongo_db.chunks.aggregate(pipeline))
+        db = get_db_session()
+        try:
+            # Query documents that have been ingested (chunk_count > 0)
+            results = db.query(OCRDocumentModel).filter(OCRDocumentModel.chunk_count > 0).all()
+            documents = []
+            for item in results:
+                documents.append(
+                    DocumentListItem(
+                        ocr_document_id=item.id,
+                        document_type=item.document_type,
+                        warehouse_id=item.warehouse_id,
+                        sku=item.sku,
+                        product_id=item.product_id,
+                        category=item.category,
+                        zone=item.zone,
+                        rack=item.rack,
+                        shelf=item.shelf,
+                        bin=item.bin,
+                        chunk_count=item.chunk_count,
+                        updated_at=item.updated_at or item.created_at
+                    )
+                )
+            return documents
+        finally:
+            db.close()
     except Exception as e:
-        logger.error(f"[MongoDB] Failed to aggregate documents: {e}")
+        logger.error(f"[Database] Failed to list documents: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database aggregation error: {str(e)}"
         )
 
-    documents = []
-    for item in results:
-        documents.append(
-            DocumentListItem(
-                ocr_document_id=item["_id"],
-                document_type=item.get("document_type"),
-                warehouse_id=item.get("warehouse_id"),
-                sku=item.get("sku"),
-                product_id=item.get("product_id"),
-                category=item.get("category"),
-                zone=item.get("zone"),
-                rack=item.get("rack"),
-                shelf=item.get("shelf"),
-                bin=item.get("bin"),
-                chunk_count=item["chunk_count"],
-                updated_at=item.get("updated_at")
-            )
-        )
-    return documents
-
 @app.get("/api/rag/documents/{document_id}", response_model=DocumentDetailResponse, summary="Get document details and chunks")
 async def get_document_details(document_id: str):
-    global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
-
+    # 1. Fetch document metadata from PostgreSQL
+    doc = None
     try:
-        chunks_cursor = mongo_db.chunks.find({"ocr_document_id": document_id}).sort("chunk_index", 1)
-        chunks = list(chunks_cursor)
+        db = get_db_session()
+        try:
+            doc = db.query(OCRDocumentModel).filter(OCRDocumentModel.id == document_id).first()
+        finally:
+            db.close()
     except Exception as e:
-        logger.error(f"[MongoDB] Failed to query chunks for {document_id}: {e}")
+        logger.error(f"[Database] Failed to query document {document_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database query error: {str(e)}"
         )
 
-    if not chunks:
+    if not doc or doc.chunk_count == 0:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID {document_id} not found."
         )
 
-    first_chunk = chunks[0]
-    chunk_list = [
-        ChunkDetail(
-            chunk_id=c["chunk_id"],
-            chunk_index=c.get("chunk_index", 0),
-            text=c.get("text", "")
+    # 2. Retrieve chunk texts dynamically from Qdrant vectors payload scroll
+    chunk_list = []
+    try:
+        qdrant_client = get_qdrant_client()
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        
+        points, _ = qdrant_client.scroll(
+            collection_name="warehouse-index",
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.ocr_document_id",
+                        match=MatchValue(value=document_id)
+                    )
+                ]
+            ),
+            limit=1000,
+            with_payload=True,
+            with_vectors=False
         )
-        for c in chunks
-    ]
+        
+        for p in points:
+            meta = p.payload.get("metadata", {})
+            chunk_list.append(
+                ChunkDetail(
+                    chunk_id=meta.get("chunk_id") or str(p.id),
+                    chunk_index=meta.get("chunk_index", 0),
+                    text=meta.get("text", "")
+                )
+            )
+        # Sort chunks by index
+        chunk_list.sort(key=lambda x: x.chunk_index)
+        
+    except Exception as q_err:
+        logger.error(f"[Qdrant] Failed to fetch chunks for document {document_id}: {q_err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Vector database retrieval error: {str(q_err)}"
+        )
+
+    if not chunk_list:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document chunks for ID {document_id} not found in vector store."
+        )
 
     return DocumentDetailResponse(
         ocr_document_id=document_id,
-        document_type=first_chunk.get("document_type"),
-        warehouse_id=first_chunk.get("warehouse_id"),
-        sku=first_chunk.get("sku"),
-        product_id=first_chunk.get("product_id"),
-        category=first_chunk.get("category"),
-        zone=first_chunk.get("zone"),
-        rack=first_chunk.get("rack"),
-        shelf=first_chunk.get("shelf"),
-        bin=first_chunk.get("bin"),
+        document_type=doc.document_type,
+        warehouse_id=doc.warehouse_id,
+        sku=doc.sku,
+        product_id=doc.product_id,
+        category=doc.category,
+        zone=doc.zone,
+        rack=doc.rack,
+        shelf=doc.shelf,
+        bin=doc.bin,
         chunks=chunk_list
     )
 
 @app.delete("/api/rag/documents/{document_id}", summary="Delete document vectors and metadata")
 async def delete_document(document_id: str):
-    global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
-
     # 1. Delete vectors from Qdrant
+    qdrant_deleted_count = 0
     try:
         qdrant_client = get_qdrant_client()
         from qdrant_client.models import FilterSelector, Filter, FieldCondition, MatchValue
+        
+        points, _ = qdrant_client.scroll(
+            collection_name="warehouse-index",
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.ocr_document_id",
+                        match=MatchValue(value=document_id)
+                    )
+                ]
+            ),
+            limit=1000,
+            with_payload=False,
+            with_vectors=False
+        )
+        qdrant_deleted_count = len(points)
+        
         qdrant_client.delete(
             collection_name="warehouse-index",
             points_selector=FilterSelector(
@@ -473,33 +549,74 @@ async def delete_document(document_id: str):
     except Exception as q_err:
         logger.warning(f"[Qdrant] Failed to delete points for document {document_id}: {q_err}")
 
-    # 2. Delete related MongoDB records
+    # 2. Reset related PostgreSQL metadata fields instead of deleting the row
+    # (or delete the row if it's a dynamic mock document with a simple string ID that isn't a valid UUID)
+    deleted_count = qdrant_deleted_count
     try:
-        delete_result = mongo_db.chunks.delete_many({"ocr_document_id": document_id})
-        deleted_count = delete_result.deleted_count
-    except Exception as m_err:
-        logger.error(f"[MongoDB] Failed to delete chunks for {document_id}: {m_err}")
+        db = get_db_session()
+        try:
+            doc = db.query(OCRDocumentModel).filter(OCRDocumentModel.id == document_id).first()
+            if doc:
+                if doc.chunk_count > 0:
+                    deleted_count = doc.chunk_count
+                
+                is_uuid = False
+                try:
+                    uuid.UUID(document_id)
+                    is_uuid = True
+                except ValueError:
+                    pass
+
+                if is_uuid:
+                    doc.chunk_count = 0
+                    doc.warehouse_id = None
+                    doc.sku = None
+                    doc.product_id = None
+                    doc.category = None
+                    doc.zone = None
+                    doc.rack = None
+                    doc.shelf = None
+                    doc.bin = None
+                    doc.processing_status = "UPLOADED"
+                else:
+                    # Dynamically generated mock/test doc: safe to hard delete
+                    db.delete(doc)
+                db.commit()
+                logger.info(f"[Database] Reset RAG metadata in PostgreSQL for {document_id}")
+        except Exception as db_err:
+            db.rollback()
+            logger.error(f"[Database] Failed to clear metadata for {document_id}: {db_err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database deletion error: {str(db_err)}"
+            )
+        finally:
+            db.close()
+    except Exception as db_init_err:
+        logger.error(f"[Database] Connection error on delete metadata: {db_init_err}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database deletion error: {str(m_err)}"
+            detail=f"Database connection error: {str(db_init_err)}"
         )
 
     return {"status": "SUCCESS", "deleted_count": deleted_count}
 
 @app.get("/api/rag/collections/stats", response_model=CollectionStatsResponse, summary="Get database and vector statistics")
 async def get_collections_stats():
-    global mongo_db
-    if mongo_db is None:
-        mongo_db = get_mongodb_db()
-
-    # 1. Total unique documents & chunks in MongoDB
+    # 1. Total unique documents & chunks in PostgreSQL
+    total_documents = 0
+    total_chunks = 0
     try:
-        total_documents = len(mongo_db.chunks.distinct("ocr_document_id"))
-        total_chunks = mongo_db.chunks.count_documents({})
+        db = get_db_session()
+        try:
+            results = db.query(OCRDocumentModel).filter(OCRDocumentModel.chunk_count > 0).all()
+            total_documents = len(results)
+            from sqlalchemy import func
+            total_chunks = db.query(func.sum(OCRDocumentModel.chunk_count)).filter(OCRDocumentModel.chunk_count > 0).scalar() or 0
+        finally:
+            db.close()
     except Exception as e:
-        logger.error(f"[MongoDB] Failed to count stats: {e}")
-        total_documents = 0
-        total_chunks = 0
+        logger.error(f"[Database] Failed to count stats: {e}")
 
     # 2. Total points in Qdrant warehouse-index
     vector_count = 0

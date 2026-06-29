@@ -38,7 +38,20 @@ def recreate_collection():
         field_name="metadata.document_type",
         field_schema="keyword"
     )
-    print(f"Recreated collection '{COLLECTION_NAME}' with vector size {VECTOR_SIZE} and COSINE distance.")
+    # Add payload index for ocr_document_id (keyword) to enable filtering & deletions
+    client.create_payload_index(
+        collection_name=COLLECTION_NAME,
+        field_name="metadata.ocr_document_id",
+        field_schema="keyword"
+    )
+    # Add payload indexes for other metadata filters
+    for field in ["sku", "warehouse_id", "product_id", "category", "zone", "rack", "shelf", "bin"]:
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name=f"metadata.{field}",
+            field_schema="keyword"
+        )
+    print(f"Recreated collection '{COLLECTION_NAME}' with vector size {VECTOR_SIZE}, COSINE distance, and all keyword payload indexes.")
 
 if __name__ == "__main__":
     recreate_collection()

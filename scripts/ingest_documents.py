@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # Add project root to python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.database import get_qdrant_client, get_mongodb_db
+from app.database import get_qdrant_client
 # Optional import of S3Handler; avoid failure if boto3 is not installed
 try:
     from app.s3_handler import S3Handler
@@ -72,7 +72,6 @@ def ingest_documents(
     config = RAGConfig.from_dict(config_dict)
     pipeline = RAGPipeline(config)
     qdrant_client = get_qdrant_client()
-    mongo_db = get_mongodb_db()
 
     if clear_existing:
         clear_qdrant_collection(collection_name)
@@ -160,16 +159,8 @@ def ingest_documents(
                 "chunk_index": chunk.get('chunk_index', i)
             }
 
-            # Upsert into MongoDB for local chunk tracking
-            try:
-                mongo_db.chunks.update_one(
-                    {"chunk_id": chunk['chunk_id']},
-                    {"$set": {**metadata, "updated_at": datetime.utcnow()}},
-                    upsert=True
-                )
-            except Exception as e:
-                # Silently catch MongoDB logging issues during script run
-                pass
+            # Upsert locally skipped (rely on Qdrant/PostgreSQL final tracking)
+            pass
 
             points.append(
                 PointStruct(
@@ -189,7 +180,56 @@ def ingest_documents(
             qdrant_client.upsert(collection_name=collection_name, points=points)
             print(f"  Upserted remaining chunks to Qdrant...")
 
-        print(f"\nIngestion complete! {len(chunks)} chunks successfully indexed in Qdrant & MongoDB.")
+        # Upsert document-level metadata to PostgreSQL
+        doc_id = "UNKNOWN"
+        for chunk in chunks:
+            if chunk.get('issue_id') and chunk.get('issue_id') != 'UNKNOWN':
+                doc_id = chunk.get('issue_id')
+                break
+        if doc_id == "UNKNOWN":
+            doc_id = "doc_" + str(uuid.uuid4())[:8]
+
+        try:
+            from app.database import get_db_session
+            from app.db_models import OCRDocumentModel
+            db = get_db_session()
+            try:
+                doc = db.query(OCRDocumentModel).filter(OCRDocumentModel.id == doc_id).first()
+                now = datetime.now()
+                if not doc:
+                    doc = OCRDocumentModel(
+                        id=doc_id,
+                        file_name=s3_key or (os.path.basename(target_path) if target_path else "Ingested Document"),
+                        file_path=file_path or s3_key or "",
+                        document_type=document_type,
+                        processing_status="COMPLETED",
+                        created_at=now,
+                    )
+                    db.add(doc)
+                
+                doc.document_type = document_type
+                doc.warehouse_id = warehouse_id or "Unknown"
+                doc.sku = sku
+                doc.product_id = product_id
+                doc.category = category
+                doc.zone = zone
+                doc.rack = rack
+                doc.shelf = shelf
+                doc.bin = bin
+                doc.chunk_count = len(chunks)
+                doc.updated_at = now
+                doc.processing_status = "COMPLETED"
+                db.commit()
+                print(f"Logged metadata in PostgreSQL for document: {doc_id}")
+            except Exception as db_err:
+                db.rollback()
+                print(f"Error logging metadata in PostgreSQL: {db_err}")
+            finally:
+                db.close()
+        except Exception as db_init_err:
+            print(f"Could not connect to PostgreSQL for metadata tracking: {db_init_err}")
+
+        print(f"\nIngestion complete! {len(chunks)} chunks successfully indexed in Qdrant & PostgreSQL.")
 
     except Exception as e:
         print(f"ERROR during ingestion: {e}")

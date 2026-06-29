@@ -181,11 +181,11 @@ class TestRAGPipeline(unittest.TestCase):
         self.assertIsNone(req.sku)
         self.assertIsNone(req.shelf)
 
-    @patch("app.main.mongo_db")
+    @patch("app.main.get_db_session")
     @patch("rag_core.vector_stores.qdrant_store.QdrantClient")
     @patch("rag_core.generators.gemini.genai")
     @patch("app.main.rag_pipeline")
-    def test_api_ingest_endpoint(self, mock_rag_pipeline, mock_genai, mock_qdrant, mock_mongo):
+    def test_api_ingest_endpoint(self, mock_rag_pipeline, mock_genai, mock_qdrant, mock_get_db):
         """Test the rag_ingest endpoint and verify Qdrant points persistence payload structure."""
         from app.main import rag_ingest
         from app.models import IngestRequest

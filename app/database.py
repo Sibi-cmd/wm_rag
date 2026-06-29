@@ -2,7 +2,8 @@ import os
 import logging
 import redis
 from qdrant_client import QdrantClient
-from pymongo import MongoClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,14 +20,19 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
-# MongoDB Configuration
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "wm_rag")
+# Database Configuration (SQLAlchemy)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///../wm_backend/db.sqlite3")
+if DATABASE_URL.startswith("sqlite:///"):
+    db_relative_path = DATABASE_URL.replace("sqlite:///", "")
+    # Handle absolute resolution on Windows
+    db_absolute_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", db_relative_path))
+    DATABASE_URL = f"sqlite:///{db_absolute_path.replace('\\', '/')}"
 
 # Lazy initialization of clients to prevent overhead on import
 _redis_client = None
 _qdrant_client = None
-_mongo_client = None
+_engine = None
+_SessionFactory = None
 
 def get_redis_client(ping=True):
     global _redis_client
@@ -58,17 +64,27 @@ def get_qdrant_client():
         )
     return _qdrant_client
 
-def get_mongodb_db(ping=True):
-    global _mongo_client
-    if _mongo_client is None:
-        # serverSelectionTimeoutMS ensures we don't hang indefinitely on connection attempts
-        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        if ping:
-            try:
-                _mongo_client.server_info()
-                logger.info("[MongoDB] Connected to MongoDB successfully")
-            except Exception as e:
-                logger.error(f"[MongoDB] Connection error: {e}")
-                raise
-    return _mongo_client[MONGODB_DB_NAME]
+def get_db_session():
+    global _engine, _SessionFactory
+    if _SessionFactory is None:
+        logger.info(f"[Database] Initializing SQLAlchemy engine for database: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL}")
+        connect_args = {}
+        if DATABASE_URL.startswith("sqlite:"):
+            connect_args = {"check_same_thread": False}
+        
+        _engine = create_engine(
+            DATABASE_URL,
+            connect_args=connect_args,
+            pool_pre_ping=True
+        )
+        _SessionFactory = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
+        
+        # Proactively create tables if they do not exist (useful for testing environments)
+        try:
+            from .db_models import Base
+            Base.metadata.create_all(_engine)
+        except Exception as e:
+            logger.warning(f"[Database] Tables auto-creation skipped or failed: {e}")
+            
+    return _SessionFactory()
 
